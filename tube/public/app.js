@@ -23,6 +23,7 @@ const state = {
   lastFetch: 0, fetchedAt: 0, feedError: null, stale: false,
   theme: null, colors: {},
   morph: null,
+  q: '',               // search query
 };
 const now = () => Date.now() + state.clockOffset;
 
@@ -73,9 +74,9 @@ function bounds() {
 }
 function fitCam() {
   const b = bounds();
-  const mobile = state.W < 640;
-  // Leave room for the legend on the left (desktop) / bottom (mobile).
-  const padL = mobile ? 20 : 230, padR = mobile ? 20 : 40, padT = mobile ? 80 : 70, padB = mobile ? 80 : 50;
+  const mobile = state.W <= 640;
+  // Leave room for the sheet: on the left (desktop) or at the bottom (phone).
+  const padL = mobile ? 16 : 400, padR = mobile ? 16 : 70, padT = mobile ? 70 : 40, padB = mobile ? 150 : 40;
   const aw = state.W - padL - padR, ah = state.H - padT - padB;
   const s = Math.min(aw / (b.x1 - b.x0), ah / (b.y1 - b.y0));
   const cxs = padL + aw / 2, cys = padT + ah / 2;
@@ -179,8 +180,9 @@ function updateLive() {
   const age = state.fetchedAt ? Math.max(0, Math.round((now() - state.fetchedAt) / 1000)) : null;
   el.className = 'live ' + (!state.fetchedAt ? (state.feedError ? 'err' : '') : age > 120 || state.stale ? 'stale' : 'ok');
   if (!state.fetchedAt) txt.textContent = state.feedError ? 'TfL feed unavailable' : 'Connecting…';
-  else if (age > 120) txt.textContent = `${n} trains · data delayed, last ${fmtAgo(age)}`;
-  else txt.textContent = `${n} trains · updated ${fmtAgo(age)}`;
+  else if (age > 120) txt.textContent = `Delayed · ${fmtAgo(age)}`;
+  else txt.textContent = `${n} trains live`;
+  el.title = state.fetchedAt ? `Updated ${fmtAgo(age)}` : '';
 }
 const fmtAgo = s => (s < 5 ? 'just now' : s < 60 ? `${s}s ago` : `${Math.round(s / 60)} min ago`);
 
@@ -259,7 +261,7 @@ function baseStateKey() {
   const selLine = state.sel?.type === 'train' ? state.trains.get(state.sel.id)?.raw.line : '';
   return [state.W, state.H, state.dpr, state.theme, state.focus, [...state.hidden].join(), selLine,
     state.sel?.type === 'station' ? state.sel.id : '', state.hover?.s?.id || '', model.layout,
-    $('panel').hidden ? 0 : $('panel').offsetHeight, document.body.classList.contains('lines-open')].join('|');
+    snap, $('sheet').offsetHeight].join('|');
 }
 
 // Screen position of a station on a given line (with parallel-line offset).
@@ -297,6 +299,7 @@ function renderBase() {
 
   // Lines, with rounded corners at bends.
   const corner = Math.max(4, lw * 3);
+  const segs = []; // screen-space line segments: obstacles for labels
   for (const l of model.lines) {
     const a = lineAlpha(l.id);
     if (!a) continue;
@@ -304,6 +307,7 @@ function renderBase() {
     g.beginPath();
     for (const ch of l.chains) {
       const pts = ch.map(id => P(l.id, id, gap));
+      for (let i = 1; i < pts.length; i++) segs.push([pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1]]);
       g.moveTo(pts[0][0], pts[0][1]);
       for (let i = 1; i < pts.length - 1; i++) {
         const [px, py] = pts[i - 1], [cx, cy] = pts[i], [nx, ny] = pts[i + 1];
@@ -367,53 +371,97 @@ function renderBase() {
   }
   g.globalAlpha = 1;
 
-  drawLabels(lctx, onScreen);
+  drawLabels(lctx, onScreen, segs, lw);
   baseCam = { ...state.cam };
   baseDirty = false;
 }
 
 function visibleStation(s) { return s.lines.some(id => !state.hidden.has(id)); }
 
-function drawLabels(g, hits) {
+// Does segment (x1,y1)-(x2,y2) touch rectangle r?
+function segHitsRect(x1, y1, x2, y2, r) {
+  const rx2 = r.x + r.w, ry2 = r.y + r.h;
+  if (Math.max(x1, x2) < r.x || Math.min(x1, x2) > rx2 || Math.max(y1, y2) < r.y || Math.min(y1, y2) > ry2) return false;
+  const inside = (x, y) => x >= r.x && x <= rx2 && y >= r.y && y <= ry2;
+  if (inside(x1, y1) || inside(x2, y2)) return true;
+  const cross = (ax, ay, bx, by, cx, cy, dx, dy) => {
+    const d = (bx - ax) * (dy - cy) - (by - ay) * (dx - cx);
+    if (!d) return false;
+    const t = ((cx - ax) * (dy - cy) - (cy - ay) * (dx - cx)) / d, u = ((cx - ax) * (by - ay) - (cy - ay) * (bx - ax)) / d;
+    return t >= 0 && t <= 1 && u >= 0 && u <= 1;
+  };
+  return cross(x1, y1, x2, y2, r.x, r.y, rx2, r.y) || cross(x1, y1, x2, y2, rx2, r.y, rx2, ry2)
+    || cross(x1, y1, x2, y2, r.x, ry2, rx2, ry2) || cross(x1, y1, x2, y2, r.x, r.y, r.x, ry2);
+}
+
+// Labels are placed like on a printed map: never over another label, a
+// station or the floating UI, and preferably not across any line. Minor
+// stations whose name can't be placed cleanly are simply not labelled.
+function drawLabels(g, hits, segs, lw) {
   const z = state.cam.s / refFit();
   const small = state.W < 640;
-  const fs = small ? 11 : Math.round(Math.min(13, 10.5 + Math.max(0, z - 1) * 0.5));
-  const pad = small ? 5 : 2;
-  const font = `500 ${fs}px -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, "Helvetica Neue", Arial, sans-serif`;
-  // Keep labels clear of the floating UI.
-  const placed = [...document.querySelectorAll('.hud > *, .panel:not([hidden]), body.lines-open .legend')].map(el => {
-    const r = el.getBoundingClientRect();
-    return { x: r.left - 4, y: r.top - 4, w: r.width + 8, h: r.height + 8 };
-  }).filter(r => r.w > 8 && r.h > 8);
+  const fs = small ? 12 : Math.round(Math.min(13, 11 + Math.max(0, z - 1) * 0.5));
+  const font = `600 ${fs}px -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, "Helvetica Neue", Arial, sans-serif`;
   const selSt = state.sel?.type === 'station' ? model.stations.get(state.sel.id) : null;
+
+  const CELL = 48;
+  const key = (cx, cy) => cx * 100003 + cy;
+  const cellsOf = r => { const out = []; for (let cx = Math.floor(r.x / CELL); cx <= Math.floor((r.x + r.w) / CELL); cx++) for (let cy = Math.floor(r.y / CELL); cy <= Math.floor((r.y + r.h) / CELL); cy++) out.push(key(cx, cy)); return out; };
+  const hard = new Map(), soft = new Map(), marks = new Map();
+  const addTo = (grid, item, r) => { for (const c of cellsOf(r)) (grid.get(c) || grid.set(c, []).get(c)).push(item); };
+  const overlaps = (a, b) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+
+  // Hard obstacles: floating UI and station markers.
+  for (const el of document.querySelectorAll('.hud > *, .sheet')) {
+    const r = el.getBoundingClientRect();
+    if (r.width > 8 && r.height > 8) { const o = { x: r.left - 4, y: r.top - 4, w: r.width + 8, h: r.height + 8 }; addTo(hard, o, o); }
+  }
+  for (const h of hits) { const o = { x: h.x - h.r, y: h.y - h.r, w: h.r * 2, h: h.r * 2, s: h.s }; addTo(marks, o, o); }
+  // Soft obstacles: the lines themselves (inflated by half a line width).
+  const pad = lw / 2 + 1;
+  for (const sg of segs) {
+    const [x1, y1, x2, y2] = sg;
+    if (Math.max(x1, x2) < -50 || Math.min(x1, x2) > state.W + 50 || Math.max(y1, y2) < -50 || Math.min(y1, y2) > state.H + 50) continue;
+    addTo(soft, sg, { x: Math.min(x1, x2) - pad, y: Math.min(y1, y2) - pad, w: Math.abs(x2 - x1) + pad * 2, h: Math.abs(y2 - y1) + pad * 2 });
+  }
+  const hitsHard = r => cellsOf(r).some(c => (hard.get(c) || []).some(o => overlaps(r, o)));
+  const hitsMark = (r, own) => cellsOf(r).some(c => (marks.get(c) || []).some(o => o.s !== own && overlaps(r, o)));
+  const hitsSoft = r => {
+    const rr = { x: r.x - pad, y: r.y - pad, w: r.w + pad * 2, h: r.h + pad * 2 };
+    return cellsOf(r).some(c => (soft.get(c) || []).some(([x1, y1, x2, y2]) => segHitsRect(x1, y1, x2, y2, rr)));
+  };
+
   const cands = [];
   for (const h of hits) {
     const s = h.s, n = s.lines.length;
     let pri = n * 10 + (s.terminal ? 12 : 0) + (s.interchange ? 6 : 0);
-    let show = z > 2.4 || (z > 1.5 && (s.interchange || s.terminal)) || n >= 3 || (s.terminal && z > 1.15);
-    if (state.focus && s.lines.includes(state.focus)) { show = show || z > 1.2; pri += 30; }
+    let show = z > 2.2 || (z > 1.4 && (s.interchange || s.terminal)) || n >= 3 || (s.terminal && z > 1.1);
+    if (state.focus && s.lines.includes(state.focus)) { show = show || z > 1.1; pri += 30; }
     if (selSt === s || state.hover?.s === s) { show = true; pri = 1000; }
     if (show) cands.push({ h, pri });
   }
   cands.sort((a, b) => b.pri - a.pri);
+
   g.font = font; g.textBaseline = 'middle'; g.textAlign = 'left'; g.lineJoin = 'round';
-  // Spatial grid for collision tests.
-  const CELL = 64, grid = new Map();
-  const cellsOf = r => { const out = []; for (let cx = Math.floor(r.x / CELL); cx <= Math.floor((r.x + r.w) / CELL); cx++) for (let cy = Math.floor(r.y / CELL); cy <= Math.floor((r.y + r.h) / CELL); cy++) out.push(cx + ',' + cy); return out; };
-  const add = r => { for (const c of cellsOf(r)) (grid.get(c) || grid.set(c, []).get(c)).push(r); };
-  const hitsAny = r => cellsOf(r).some(c => (grid.get(c) || []).some(p => r.x < p.x + p.w && r.x + r.w > p.x && r.y < p.y + p.h && r.y + r.h > p.y));
-  placed.forEach(add);
+  const hgt = fs + 3;
   for (const { h, pri } of cands) {
-    const w = measure(g, h.s.name, font), hgt = fs + 2, off = h.r + 3;
-    const opts = [[h.x + off, h.y - hgt / 2], [h.x - off - w, h.y - hgt / 2], [h.x - w / 2, h.y - off - hgt], [h.x - w / 2, h.y + off]]
-      .map(([x, y]) => ({ x: x - pad, y: y - pad, w: w + pad * 2, h: hgt + pad * 2 }));
-    const r = opts.find(o => !hitsAny(o)) || (pri >= 1000 ? opts[0] : null);
+    const w = measure(g, h.s.name, font), off = h.r + 3, d = off * 0.75;
+    const opts = [
+      [h.x + off, h.y - hgt / 2], [h.x - off - w, h.y - hgt / 2],
+      [h.x + d, h.y - d - hgt], [h.x + d, h.y + d], [h.x - d - w, h.y - d - hgt], [h.x - d - w, h.y + d],
+      [h.x - w / 2, h.y - off - hgt], [h.x - w / 2, h.y + off],
+    ].map(([x, y]) => ({ x, y, w, h: hgt }));
+    let r = opts.find(o => !hitsHard(o) && !hitsMark(o, h.s) && !hitsSoft(o));
+    // Important stations may cross a line or brush a neighbouring marker (the
+    // halo keeps them legible) rather than vanish; never another label.
+    if (!r && pri >= 20) r = opts.find(o => !hitsHard(o) && !hitsMark(o, h.s)) || opts.find(o => !hitsHard(o));
+    if (!r && pri >= 1000) r = opts[0];
     if (!r) continue;
-    add(r);
+    addTo(hard, r, r);
     g.globalAlpha = Math.max(0.25, Math.max(...h.s.lines.map(lineAlpha)));
-    g.lineWidth = 3.5; g.strokeStyle = state.colors.bg; g.fillStyle = state.colors.fg;
-    g.strokeText(h.s.name, r.x + pad, r.y + pad + hgt / 2);
-    g.fillText(h.s.name, r.x + pad, r.y + pad + hgt / 2);
+    g.lineWidth = 4; g.strokeStyle = state.colors.bg; g.fillStyle = state.colors.fg;
+    g.strokeText(h.s.name, r.x, r.y + hgt / 2);
+    g.fillText(h.s.name, r.x, r.y + hgt / 2);
   }
   g.globalAlpha = 1;
 }
@@ -458,8 +506,6 @@ function frame(tms) {
     const uncovered = dx > 0.5 || dy > 0.5 || dx + dw < state.W - 0.5 || dy + dh < state.H - 0.5;
     rerender = (stale && !moving) || uncovered || k < 0.7 || k > 1.45;
   }
-  // Idle: trains move slowly, 30 fps is plenty and saves battery.
-  if (!rerender && !moving && !state.morph && tms - lastDraw < 32) return;
   lastDraw = tms;
   if (rerender) { renderBase(); place(); }
 
@@ -555,7 +601,8 @@ function drawLive(tms) {
     g.lineWidth = 1.6; g.strokeStyle = bg; g.stroke();
     if (uncertain) { g.fillStyle = bg; g.fill(); g.lineWidth = 1.3; g.strokeStyle = c; g.stroke(); }
     else { g.fillStyle = c; g.fill(); }
-    // nose
+    // Nose dot shows direction, but only once trains are big enough to read it.
+    if (Wd < 7) return;
     g.beginPath();
     const nr = Wd * 0.22, no = L / 2 - Wd / 2;
     for (const it of items) { g.moveTo(it.x + it.hx * no + nr, it.y + it.hy * no); g.arc(it.x + it.hx * no, it.y + it.hy * no, nr, 0, Math.PI * 2); }
@@ -737,29 +784,15 @@ function hoverAt(x, y) {
 }
 
 function clickAt(x, y) {
-  if (document.body.classList.contains('lines-open')) { setLinesOpen(false); return; }
   const p = pick(x, y);
-  if (!p) { if (state.sel) select(null); else if (state.focus) { state.focus = null; renderLegend(); } return; }
+  if (!p) {
+    if (state.sel) closeDetail();
+    else if (isPhone() && snap !== 'peek') setSnap('peek');
+    $('q').blur();
+    return;
+  }
   if (p.type === 'train') select({ type: 'train', id: p.tr.id });
   else select({ type: 'station', id: p.s.id });
-}
-
-// On phones the info sheet covers the bottom half: glide the selection into
-// the visible area above it.
-function revealAbove(wx, wy) {
-  if (state.W >= 640) return;
-  const y = sy(wy), x = sx(wx), targetY = state.H * 0.3;
-  if (y > 60 && y < state.H * 0.45 && x > 20 && x < state.W - 20) return;
-  flyTo({ s: state.cam.s, x: wx - (state.W / 2 - state.W / 2) / state.cam.s, y: wy - (targetY - state.H / 2) / state.cam.s }, 450);
-}
-
-function select(sel) {
-  state.sel = sel;
-  if (sel) setLinesOpen(false);
-  if (sel?.type === 'station') { const s = model.stations.get(sel.id); revealAbove(s.wx, s.wy); }
-  if (sel?.type === 'train') { const tr = state.trains.get(sel.id); const p = tr && worldPos(tr, now()); if (p) revealAbove(p.x, p.y); }
-  if (sel?.type === 'station') loadStation(sel.id);
-  renderPanel();
 }
 
 function setLayout(mode) {
@@ -774,49 +807,173 @@ $('fit').onclick = () => flyTo(fitCam());
 document.querySelectorAll('[data-layout]').forEach(btn => btn.onclick = () => setLayout(btn.dataset.layout));
 $('layout-btn').onclick = () => setLayout(model.layout === 'geo' ? 'schematic' : 'geo');
 addEventListener('keydown', e => {
-  if (e.key === 'Escape') { if (state.sel) select(null); else { state.focus = null; renderLegend(); } }
+  if (e.key === 'Escape') { if (state.q) { $('q').value = ''; state.q = ''; renderSheet(); } else if (state.sel) closeDetail(); }
 });
-addEventListener('resize', () => { resize(); state.fitScale = fitCam().s; invalidate(); });
-
-// Mobile: the lines list lives in a sheet behind a "Lines" button.
-function setLinesOpen(open) {
-  document.body.classList.toggle('lines-open', open);
-  $('lines-btn').setAttribute('aria-expanded', open);
-}
-$('lines-btn').onclick = () => { const open = !document.body.classList.contains('lines-open'); if (open) select(null); setLinesOpen(open); };
-
-// Mobile: drag the info sheet down to dismiss it.
-{
-  const panel = $('panel');
-  let drag = null;
-  panel.addEventListener('pointerdown', e => {
-    if (state.W >= 640 || e.target.closest('button, a')) return;
-    const top = panel.getBoundingClientRect().top;
-    if (e.clientY - top > 56 && panel.scrollTop > 0) return; // let the list scroll
-    if (e.clientY - top > 56) return;
-    drag = { y0: e.clientY, id: e.pointerId };
-    try { panel.setPointerCapture(e.pointerId); } catch {}
-    panel.style.transition = 'none';
-  });
-  panel.addEventListener('pointermove', e => {
-    if (!drag || e.pointerId !== drag.id) return;
-    panel.style.transform = `translateY(${Math.max(0, e.clientY - drag.y0)}px)`;
-  });
-  const end = e => {
-    if (!drag || e.pointerId !== drag.id) return;
-    const dy = e.clientY - drag.y0; drag = null;
-    panel.style.transition = 'transform .2s ease';
-    if (dy > 70) {
-      panel.style.transform = 'translateY(110%)';
-      setTimeout(() => { panel.style.transform = ''; panel.style.transition = ''; if (state.sel?.type === 'line') { state.focus = null; renderLegend(); } select(null); }, 180);
-    } else panel.style.transform = '';
-  };
-  panel.addEventListener('pointerup', end);
-  panel.addEventListener('pointercancel', end);
-}
+addEventListener('resize', () => { resize(); state.fitScale = fitCam().s; invalidate(); setSnap(snap, false); });
 
 // ---------------------------------------------------------------------------
-// Legend
+// The sheet: search, service status, lines, and station / train / line detail.
+// Phones: docked at the bottom with three snap points. Desktop: a left card.
+
+const sheet = $('sheet'), sheetBody = $('sheet-body');
+const isPhone = () => state.W <= 640;
+let snap = 'peek';
+
+const safeBottom = (() => {
+  const probe = document.createElement('div');
+  probe.style.cssText = 'position:fixed;bottom:0;height:env(safe-area-inset-bottom);visibility:hidden';
+  document.body.appendChild(probe);
+  return () => probe.offsetHeight;
+})();
+
+function snapHeight(name) {
+  const peek = sheet.querySelector('.grab').offsetHeight + $('sheet-top').offsetHeight + safeBottom() + 4;
+  if (name === 'peek') return peek;
+  if (name === 'half') return Math.max(peek + 180, Math.round(state.H * 0.5));
+  return sheet.offsetHeight;
+}
+// Height of map hidden behind the sheet (phones) / width taken on the left (desktop).
+const sheetCover = () => (isPhone() ? snapHeight(snap) : 0);
+
+function setSnap(name, animate = true) {
+  snap = name;
+  if (!isPhone()) { sheet.style.transform = ''; sheetBody.style.height = ''; return; }
+  const h = snapHeight(name);
+  sheet.classList.toggle('anim', animate);
+  sheet.style.transform = `translateY(${sheet.offsetHeight - h}px)`;
+  sheetBody.style.height = Math.max(0, h - (snapHeight('peek') - safeBottom())) + 'px';
+  invalidate();
+}
+
+// Drag the sheet by its handle / header.
+{
+  let d = null;
+  const down = e => {
+    if (!isPhone() || e.target.closest('input, button, .search')) return;
+    const m = new DOMMatrixReadOnly(getComputedStyle(sheet).transform);
+    d = { id: e.pointerId, y0: e.clientY, start: m.m42, t: performance.now(), moved: false, samples: [[performance.now(), e.clientY]] };
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+    sheet.classList.remove('anim');
+  };
+  const move = e => {
+    if (!d || e.pointerId !== d.id) return;
+    const dy = e.clientY - d.y0;
+    if (Math.abs(dy) > 4) d.moved = true;
+    const min = 0, max = sheet.offsetHeight - snapHeight('peek');
+    let y = d.start + dy;
+    if (y < min) y = min - Math.sqrt(min - y) * 2; // rubber band
+    if (y > max) y = max + Math.sqrt(y - max) * 2;
+    sheet.style.transform = `translateY(${y}px)`;
+    d.samples.push([performance.now(), e.clientY]);
+    if (d.samples.length > 5) d.samples.shift();
+  };
+  const up = e => {
+    if (!d || e.pointerId !== d.id) return;
+    const dd = d; d = null;
+    if (!dd.moved) { setSnap(snap === 'peek' ? 'half' : 'peek'); return; }
+    const [t0, y0] = dd.samples[0], [t1, y1] = dd.samples[dd.samples.length - 1];
+    const v = (y1 - y0) / Math.max(1, t1 - t0); // px/ms, positive = down
+    const y = dd.start + (e.clientY - dd.y0) + v * 180; // project the fling
+    const H = sheet.offsetHeight;
+    const best = ['peek', 'half', 'full'].map(n => [n, Math.abs(H - snapHeight(n) - y)]).sort((a, b) => a[1] - b[1])[0][0];
+    if (best === 'peek' && state.sel) { closeDetail(); return; }
+    setSnap(best);
+  };
+  for (const el of [sheet.querySelector('.grab'), $('sheet-top')]) {
+    el.addEventListener('pointerdown', down);
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', up);
+    el.addEventListener('pointercancel', up);
+  }
+}
+
+// Keep the selection visible above the sheet.
+function revealAbove(wx, wy) {
+  const x = sx(wx), y = sy(wy);
+  const top = 70, bottom = state.H - (isPhone() ? snapHeight('half') : 0) - 30;
+  const left = isPhone() ? 24 : 400, right = state.W - 24;
+  if (y > top && y < bottom && x > left && x < right) return;
+  const cx = isPhone() ? state.W / 2 : (400 + state.W) / 2, cy = (top + bottom) / 2;
+  flyTo({ s: state.cam.s, x: wx - (cx - state.W / 2) / state.cam.s, y: wy - (cy - state.H / 2) / state.cam.s }, 450);
+}
+
+function flyToStation(s) {
+  const k = Math.max(state.cam.s, refFit() * 2.8);
+  const cx = isPhone() ? state.W / 2 : (400 + state.W) / 2;
+  const cy = isPhone() ? (70 + state.H - snapHeight('half')) / 2 : state.H / 2;
+  flyTo({ s: k, x: s.wx - (cx - state.W / 2) / k, y: s.wy - (cy - state.H / 2) / k }, 650);
+}
+
+function select(sel, { fly = false } = {}) {
+  state.sel = sel;
+  state.q = ''; $('q').value = ''; $('q').blur();
+  if (sel?.type === 'line') state.focus = sel.id;
+  else if (sel) state.focus = null;
+  if (sel?.type === 'station') {
+    const s = model.stations.get(sel.id);
+    loadStation(sel.id);
+    fly ? flyToStation(s) : revealAbove(s.wx, s.wy);
+  }
+  if (sel?.type === 'train') { const tr = state.trains.get(sel.id); const p = tr && worldPos(tr, now()); if (p) revealAbove(p.x, p.y); }
+  if (sel && isPhone()) setSnap('half');
+  sheetBody.scrollTop = 0;
+  renderSheet();
+}
+function closeDetail() {
+  state.sel = null; state.focus = null;
+  if (isPhone()) setSnap('peek');
+  renderSheet();
+}
+
+// Search -------------------------------------------------------------------
+
+const norm = s => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/&/g, 'and').replace(/\bst\.?\b/g, 'st').replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+const searchIndex = [...model.stations.values()]
+  .filter(s => !s.siblings.some(o => o < s.id && model.stations.get(o).name === s.name)) // one row per station name
+  .map(s => ({ s, n: norm(s.name) }));
+function searchStations(q) {
+  const n = norm(q);
+  if (!n) return [];
+  return searchIndex
+    .map(e => {
+      const score = e.n === n ? 0 : e.n.startsWith(n) ? 1 : e.n.split(' ').some(w => w.startsWith(n)) ? 2 : e.n.includes(n) ? 3 : 9;
+      return { ...e, score };
+    })
+    .filter(e => e.score < 9)
+    .sort((a, b) => a.score - b.score || b.s.lines.length - a.s.lines.length || a.s.name.localeCompare(b.s.name))
+    .slice(0, 12);
+}
+const q = $('q');
+// Open the sheet *before* the field takes focus, so the search box is already
+// near the top and iOS has no reason to scroll the page for the keyboard.
+document.querySelector('.search').addEventListener('pointerdown', e => {
+  if (!isPhone() || snap === 'full') return;
+  e.preventDefault();
+  setSnap('full', false);
+  q.focus({ preventScroll: true }); // same user gesture, so iOS still shows the keyboard
+});
+q.addEventListener('focus', () => { if (isPhone() && snap !== 'full') setSnap('full'); });
+// iOS may still nudge the document when the keyboard appears; keep it pinned.
+addEventListener('scroll', () => { if (scrollY || scrollX) scrollTo(0, 0); });
+visualViewport?.addEventListener('resize', () => { if (scrollY) scrollTo(0, 0); });
+q.addEventListener('input', () => { state.q = q.value; sheetBody.scrollTop = 0; renderSheet(); });
+q.addEventListener('keydown', e => {
+  if (e.key === 'Enter') { const r = searchStations(q.value)[0]; if (r) select({ type: 'station', id: r.s.id }, { fly: true }); }
+});
+$('live').onclick = () => { if (state.sel) closeDetail(); if (isPhone()) setSnap('half'); };
+
+// Rendering the sheet ---------------------------------------------------------
+
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const chip = id => { const l = model.lineById.get(id); return `<span class="chip"><i style="background:${l.c}"></i>${esc(l.name)}</span>`; };
+const minsHTML = ms => {
+  const s = ms / 1000;
+  if (s < 30) return '<span class="min due">Due</span>';
+  return `<span class="min">${Math.max(1, Math.round(s / 60))}<small>min</small></span>`;
+};
+const closeBtn = '<button class="close" data-act="close" aria-label="Close"><svg viewBox="0 0 16 16" width="13" height="13" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></svg></button>';
+const eyeOn = '<svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 10s3-5.5 8-5.5S18 10 18 10s-3 5.5-8 5.5S2 10 2 10z"/><circle cx="10" cy="10" r="2.5"/></svg>';
+const eyeOff = '<svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 10s3-5.5 8-5.5S18 10 18 10s-3 5.5-8 5.5S2 10 2 10z"/><path d="M3.5 16.5l13-13"/></svg>';
 
 function severityClass(statuses) {
   if (!statuses?.length) return '';
@@ -824,96 +981,74 @@ function severityClass(statuses) {
   return worst >= 10 ? '' : worst >= 7 ? 'warn' : 'bad';
 }
 
-function renderLegend() {
-  const el = $('legend');
-  if (!el) return;
-  const rows = model.lines.map(l => {
-    const st = state.status.get(l.id);
-    return `<div class="row ${state.focus === l.id ? 'active' : ''} ${state.hidden.has(l.id) ? 'off' : ''}" data-line="${l.id}" role="button" tabindex="0" title="${esc(st?.map(s => s.text).join(', ') || l.name)}">
-      <span class="sw" style="background:${l.c}"></span>
-      <span class="nm">${l.name}</span>
-      <span class="st ${severityClass(st)}"></span>
-      <span class="ct">${state.trainCounts[l.id] ?? ''}</span>
-      <span class="eye" data-eye="${l.id}" title="${state.hidden.has(l.id) ? 'Show' : 'Hide'} line">${state.hidden.has(l.id) ? eyeOff : eyeOn}</span>
-    </div>`;
-  }).join('');
-  el.innerHTML = `<div class="hd"><span>Lines</span><button id="allon">${state.hidden.size ? 'Show all' : state.focus ? 'Clear' : ''}</button></div>${rows}`;
-  // Compact mobile button: colour stripes + count of disrupted lines.
-  const btn = $('lines-btn');
-  if (btn) {
-    const disrupted = model.lines.filter(l => severityClass(state.status.get(l.id))).length;
-    const focus = state.focus && model.lineById.get(state.focus);
-    btn.innerHTML = `<span class="stripes">${model.lines.map(l => `<i style="background:${l.c};opacity:${state.hidden.has(l.id) ? 0.25 : 1}"></i>`).join('')}</span>`
-      + `<span>${focus ? esc(focus.name) : 'Lines'}</span>`
-      + (disrupted ? `<span class="badge">${disrupted} disrupted</span>` : '');
-  }
-}
-const eyeOn = '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8 12.1 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2"/></svg>';
-const eyeOff = '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8 12.1 12.5 8 12.5 1.5 8 1.5 8z"/><path d="M2.5 13.5l11-11"/></svg>';
-
-$('legend').addEventListener('click', e => {
-  if (e.target.closest('#allon')) { state.hidden.clear(); state.focus = null; renderLegend(); return; }
-  const eye = e.target.closest('[data-eye]');
-  if (eye) {
-    const id = eye.dataset.eye;
-    state.hidden.has(id) ? state.hidden.delete(id) : state.hidden.add(id);
-    if (state.focus === id) state.focus = null;
-    renderLegend(); return;
-  }
-  const row = e.target.closest('[data-line]');
-  if (!row) return;
-  const id = row.dataset.line;
-  state.hidden.delete(id);
-  if (state.focus === id) { state.focus = null; if (state.sel?.type === 'line') select(null); }
-  else { state.focus = id; select({ type: 'line', id }); }
-  renderLegend();
-});
-
-// ---------------------------------------------------------------------------
-// Panels
-
-const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const pill = id => { const l = model.lineById.get(id); return `<span class="pill"><i style="background:${l.c}"></i>${l.name}</span>`; };
-const mins = ms => { const s = ms / 1000; return s < 30 ? '<span class="due">due</span>' : s < 90 ? '1 min' : `${Math.round(s / 60)} min`; };
-
 let stationData = null;
 async function loadStation(id) {
   const s = model.stations.get(id);
-  const ids = [id, ...s.siblings];
-  stationData = { id, loading: true, arrivals: [] };
+  if (stationData?.id !== id) stationData = { id, loading: true, arrivals: [] };
   try {
-    const d = await data.station(ids);
+    const d = await data.station([id, ...s.siblings]);
     if (state.sel?.id !== id) return;
     stationData = { id, arrivals: d.arrivals, at: Date.now() };
   } catch {
     stationData = { id, error: true, arrivals: [] };
   }
-  renderPanel();
+  renderSheet();
 }
 
-let lastPanelHTML = '';
-function renderPanel() {
-  const panel = $('panel'), body = $('panel-body');
-  const sel = state.sel;
-  if (!sel) { panel.hidden = true; lastPanelHTML = ''; return; }
-  const html = sel.type === 'station' ? stationHTML(model.stations.get(sel.id))
-    : sel.type === 'train' ? trainHTML(state.trains.get(sel.id))
-    : lineHTML(model.lineById.get(sel.id));
-  // Only touch the DOM when the content actually changed (it re-renders every second).
-  if (html !== lastPanelHTML) { body.innerHTML = html; lastPanelHTML = html; }
-  panel.hidden = false;
+let lastSheetHTML = '';
+function renderSheet() {
+  const view = state.q ? 'search' : state.sel ? state.sel.type : 'home';
+  const html = view === 'search' ? searchHTML(state.q)
+    : view === 'station' ? stationHTML(model.stations.get(state.sel.id))
+    : view === 'train' ? trainHTML(state.trains.get(state.sel.id))
+    : view === 'line' ? lineHTML(model.lineById.get(state.sel.id))
+    : homeHTML();
+  // Only touch the DOM when the content actually changed (re-rendered every second).
+  if (html !== lastSheetHTML) { sheetBody.innerHTML = html; lastSheetHTML = html; }
 }
-$('panel-close').onclick = () => { if (state.sel?.type === 'line') { state.focus = null; renderLegend(); } select(null); };
+const renderLegend = renderSheet, renderPanel = renderSheet; // old names used above
+
+function homeHTML() {
+  const disrupted = model.lines.filter(l => severityClass(state.status.get(l.id)));
+  const worst = disrupted.some(l => severityClass(state.status.get(l.id)) === 'bad') ? 'bad' : disrupted.length ? 'warn' : '';
+  let html = '';
+  if (state.status.size) {
+    html += `<div class="summary ${worst}"><i class="dot"></i><div>${disrupted.length
+      ? `<b>${disrupted.map(l => esc(l.name)).join(', ')}</b><span class="muted">${esc(disrupted.map(l => state.status.get(l.id)[0].text).filter((v, i, a) => a.indexOf(v) === i).join(' · '))}</span>`
+      : '<b>Good service</b><span class="muted">on all Underground lines</span>'}</div></div>`;
+  }
+  html += '<div class="label">Lines</div><div class="rows">';
+  for (const l of model.lines) {
+    const st = state.status.get(l.id), cls = severityClass(st), n = state.trainCounts[l.id];
+    const off = state.hidden.has(l.id);
+    html += `<div class="row ${off ? 'off' : ''}" data-line="${l.id}" role="button" tabindex="0">
+      <span class="sw" style="background:${l.c}"></span>
+      <span class="main"><div class="name">${esc(l.name)}</div><div class="meta ${cls}">${esc(st?.[0]?.text || 'Status loading')}${n ? ` · ${n} trains` : ''}</div></span>
+      <button class="eye" data-eye="${l.id}" aria-label="${off ? 'Show' : 'Hide'} ${esc(l.name)}">${off ? eyeOff : eyeOn}</button>
+    </div>`;
+  }
+  html += '</div><p class="foot">Train positions are estimated between stations from TfL’s live arrival predictions; they are not GPS. Data: TfL Open Data.</p>';
+  return html;
+}
+
+function searchHTML(qs) {
+  const res = searchStations(qs);
+  if (!res.length) return `<p class="empty">No station matches “${esc(qs)}”.</p>`;
+  return '<div class="rows">' + res.map(({ s }) => {
+    const lines = [...new Set([s, ...s.siblings.map(id => model.stations.get(id))].flatMap(x => x.lines))];
+    return `<button class="row" data-station="${s.id}"><span class="main"><div class="name">${esc(s.name)}</div><div class="dots">${lines.map(id => `<i style="background:${model.lineById.get(id).c}"></i>`).join('')}</div></span></button>`;
+  }).join('') + '</div>';
+}
 
 function stationHTML(s) {
   const lines = [...new Set([s, ...s.siblings.map(id => model.stations.get(id))].flatMap(x => x.lines))];
-  let html = `<h2>${esc(s.name)}</h2><div class="sub">${lines.map(pill).join('')}${s.zone ? `<span class="muted">Zone ${esc(s.zone)}</span>` : ''}</div>`;
+  let html = `<div class="head"><div class="t"><h2>${esc(s.name)}</h2><div class="sub">${lines.map(chip).join('')}${s.zone ? `<span>Zone ${esc(s.zone)}</span>` : ''}</div></div>${closeBtn}</div>`;
   for (const id of lines) {
-    const st = state.status.get(id);
-    if (severityClass(st)) html += `<div class="status ${severityClass(st)}"><b>${model.lineById.get(id).name}:</b> ${esc(st[0].text)}</div>`;
+    const st = state.status.get(id), cls = severityClass(st);
+    if (cls) html += `<div class="alert ${cls === 'bad' ? 'bad' : ''}"><b>${esc(model.lineById.get(id).name)}:</b> ${esc(st[0].text)}</div>`;
   }
-  if (!stationData || stationData.id !== s.id || stationData.loading) return html + '<p class="muted">Loading arrivals…</p>';
-  if (stationData.error) return html + '<p class="muted">Arrivals unavailable right now.</p>';
+  if (!stationData || stationData.id !== s.id || stationData.loading) return html + '<p class="empty">Loading departures…</p>';
+  if (stationData.error) return html + '<p class="empty">Departures are unavailable right now.</p>';
   const t = now();
   const groups = new Map();
   for (const a of stationData.arrivals) {
@@ -922,63 +1057,80 @@ function stationHTML(s) {
     const k = `${a.line}|${dir}`;
     if (!groups.has(k)) groups.set(k, { line: a.line, dir, list: [] });
     const g = groups.get(k);
-    if (!g.list.some(x => x.vehicleId === a.vehicleId && a.vehicleId && Math.abs(x.t - a.t) < 60_000)) g.list.push(a);
+    if (!g.list.some(x => x.vehicleId && x.vehicleId === a.vehicleId && Math.abs(x.t - a.t) < 60_000)) g.list.push(a);
   }
-  if (!groups.size) return html + '<p class="muted">No trains predicted in the next half hour.</p>';
+  if (!groups.size) return html + '<p class="empty">No trains expected in the next half hour.</p>';
   const order = [...groups.values()].sort((a, b) => model.lineById.get(a.line).order - model.lineById.get(b.line).order || a.dir.localeCompare(b.dir));
   for (const g of order) {
     const l = model.lineById.get(g.line);
-    html += `<h3><i style="background:${l.c}"></i>${l.name} · ${esc(g.dir)}</h3><div class="arr">`;
-    for (const a of g.list.slice(0, 3)) html += `<div class="d">${esc(/check front/i.test(a.destination || '') || !a.destination ? 'Check front of train' : a.destination)}</div><div class="t">${mins(a.t - t)}</div>`;
-    html += '</div>';
+    html += `<section class="board"><header><i style="background:${l.c}"></i>${esc(l.name)} · ${esc(g.dir)}</header>`;
+    for (const a of g.list.slice(0, 3)) {
+      const to = /check front/i.test(a.destination || '') || !a.destination ? 'Check front of train' : a.destination;
+      html += `<div class="dep"><span class="to">${esc(to)}</span>${minsHTML(a.t - t)}</div>`;
+    }
+    html += '</section>';
   }
-  return html + `<div class="disclaimer">Live predictions from TfL. Updated ${fmtAgo(Math.round((Date.now() - stationData.at) / 1000))}.</div>`;
+  return html + `<p class="foot">Live departures from TfL · updated ${fmtAgo(Math.round((Date.now() - stationData.at) / 1000))}</p>`;
 }
 
 function trainHTML(tr) {
-  if (!tr || !tr.raw) return '<h2>Train</h2><p class="muted">This train is no longer being reported.</p>';
+  if (!tr || !tr.raw) return `<div class="head"><div class="t"><h2>Train</h2></div>${closeBtn}</div><p class="empty">This train is no longer being reported.</p>`;
   const r = tr.raw, l = model.lineById.get(r.line), t = now();
   const loc = locate(tr.pts, t);
   const S = id => model.stations.get(id)?.name || id;
-  const upcoming = tr.pts.filter((p, i) => i > 0 || !r.from).filter(p => p.arr === -Infinity ? false : p.arr > t - 20_000);
+  const upcoming = tr.pts.filter((p, i) => (i > 0 || !r.from) && p.arr !== -Infinity && p.arr > t - 20_000);
   const next = upcoming[0];
   const dir = (r.platform || '').match(/^(\w+bound)/i)?.[1];
   const age = Math.round((t - r.observedAt) / 1000);
-  let html = `<h2 style="color:${l.c}">${esc(l.name)}</h2>
-    <div class="sub">${r.destinationName ? `to <b style="color:var(--fg);font-weight:500">${esc(r.destinationName)}</b>` : 'Destination not given'}${dir ? ` · ${esc(dir[0].toUpperCase() + dir.slice(1).toLowerCase())}` : ''}</div>
-    <dl class="kv">
-      <dt>Train</dt><dd>Set ${esc(r.vehicleId)}</dd>
-      <dt>Now</dt><dd>${loc && !loc.moving ? `At ${esc(S(loc.a))}` : loc ? `Between ${esc(S(loc.a))} and ${esc(S(loc.b))}` : '—'} <span class="muted">(est.)</span></dd>
-      <dt>TfL says</dt><dd>${esc(r.location || '—')} <span class="muted">${fmtAgo(age)}</span></dd>
-      ${next ? `<dt>Next</dt><dd>${esc(S(next.s))} · ${mins(next.arr - t)}</dd>` : ''}
-    </dl>`;
+  const where = loc && !loc.moving ? `At ${esc(S(loc.a))}` : loc ? `${esc(S(loc.a))} → ${esc(S(loc.b))}` : '—';
+  let html = `<div class="head"><div class="t"><h2>${r.destinationName ? esc(r.destinationName) : esc(l.name)}</h2>
+    <div class="sub">${chip(l.id)}${dir ? `<span>${esc(dir[0].toUpperCase() + dir.slice(1).toLowerCase())}</span>` : ''}<span>Train ${esc(r.vehicleId)}</span></div></div>${closeBtn}</div>
+    <div class="now"><div class="k">NOW · ESTIMATED</div><div class="v">${where}</div>
+    ${next ? `<div class="n">Next: ${esc(S(next.s))} · ${next.arr - t < 30_000 ? 'due' : Math.max(1, Math.round((next.arr - t) / 60000)) + ' min'}</div>` : ''}</div>`;
   if (upcoming.length) {
-    html += `<h3>Upcoming</h3><ul class="stops" style="--c:${l.c}">`;
-    for (const p of upcoming.slice(0, 8)) html += `<li><span>${esc(S(p.s))}</span><span>${p.arr - t < 30_000 ? 'due' : new Date(p.arr - state.clockOffset).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span></li>`;
+    html += `<div class="label">Next stops</div><ul class="stops" style="--c:${l.c}">`;
+    for (const p of upcoming.slice(0, 10)) html += `<li><span>${esc(S(p.s))}</span><span>${p.arr - t < 30_000 ? 'due' : new Date(p.arr - state.clockOffset).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span></li>`;
     html += '</ul>';
   }
-  html += `<div class="disclaimer">Position is interpolated between stations from TfL arrival predictions, not measured. ${tr.uncertain ? 'The previous station is unknown, so this train is shown at its next stop (hollow marker).' : ''}</div>`;
+  html += `<p class="foot">TfL last reported “${esc(r.location || 'no location')}” ${fmtAgo(age)}. The position between stations is interpolated from arrival predictions.${tr.uncertain ? ' The previous station is unknown, so the train is shown at its next stop (hollow marker).' : ''}</p>`;
   return html;
 }
 
 function lineHTML(l) {
   const st = state.status.get(l.id) || [];
   const n = state.trainCounts[l.id] || 0;
-  let html = `<h2 style="color:${l.c}">${esc(l.name)}</h2><div class="sub">${n} trains reported · ${l.adj.size} stations</div>`;
-  if (!st.length) html += '<p class="muted">Status loading…</p>';
+  let html = `<div class="head"><div class="t"><h2>${esc(l.name)}</h2><div class="sub">${chip(l.id)}<span>${n} trains running</span><span>${l.adj.size} stations</span></div></div>${closeBtn}</div>`;
   for (const s of st) {
     const cls = severityClass([s]);
-    html += cls ? `<div class="status ${cls}"><b>${esc(s.text)}</b>${s.reason ? `<br>${esc(s.reason.replace(/^[^:]+:\s*/, ''))}` : ''}</div>` : `<p>${esc(s.text)}</p>`;
+    html += cls ? `<div class="alert ${cls === 'bad' ? 'bad' : ''}"><b>${esc(s.text)}</b>${s.reason ? `<br>${esc(s.reason.replace(/^[^:]+:\s*/, ''))}` : ''}</div>`
+      : `<div class="summary"><i class="dot"></i><div><b>${esc(s.text)}</b></div></div>`;
   }
-  const others = model.lines.filter(o => o.id !== l.id && severityClass(state.status.get(o.id)));
-  if (others.length) html += `<h3>Elsewhere</h3>` + others.map(o => `<div class="muted" style="margin:2px 0">${pill(o.id)} ${esc(state.status.get(o.id)[0].text)}</div>`).join('');
+  // Stations in route order (longest route first, then any branch stations).
+  const order = [];
+  for (const r of [...l.routes].sort((a, b) => b.length - a.length)) for (const id of r) if (!order.includes(id) && model.stations.has(id)) order.push(id);
+  html += `<div class="label">Stations</div><ul class="stops" style="--c:${l.c}">` + order.map(id => `<li data-station="${id}" role="button"><span>${esc(model.stations.get(id).name)}</span><span></span></li>`).join('') + '</ul>';
   return html;
 }
+
+sheetBody.addEventListener('click', e => {
+  const eye = e.target.closest('[data-eye]');
+  if (eye) {
+    e.stopPropagation();
+    const id = eye.dataset.eye;
+    state.hidden.has(id) ? state.hidden.delete(id) : state.hidden.add(id);
+    renderSheet(); return;
+  }
+  if (e.target.closest('[data-act="close"]')) { closeDetail(); return; }
+  const st = e.target.closest('[data-station]');
+  if (st) { select({ type: 'station', id: st.dataset.station }, { fly: true }); return; }
+  const row = e.target.closest('[data-line]');
+  if (row) { state.hidden.delete(row.dataset.line); select({ type: 'line', id: row.dataset.line }); }
+});
 
 // Live countdowns
 setInterval(() => {
   updateLive();
-  if (state.sel) renderPanel();
+  if (state.sel && !state.q) renderSheet();
 }, 1000);
 setInterval(() => { if (state.sel?.type === 'station') loadStation(state.sel.id); }, 20_000);
 
@@ -991,11 +1143,15 @@ state.cam = fitCam();
 state.fitScale = state.cam.s;
 // Portrait phones: the whole network is tiny, so open on central London
 // (the fit button still shows everything).
-if (state.W < 640 && state.H > state.W) {
+renderSheet();
+setSnap('peek', false);
+netBounds = bounds();
+if (isPhone() && state.H > state.W) {
   const a = model.stations.get('940GZZLUOXC'), b = model.stations.get('940GZZLUBNK');
-  if (a && b) state.cam = { x: (a.wx + b.wx) / 2, y: (a.wy + b.wy) / 2, s: state.fitScale * 2.6 };
+  const k = refFit() * 1.2;
+  // Centre zone 1 in the part of the screen not covered by the sheet.
+  if (a && b) state.cam = { x: (a.wx + b.wx) / 2, y: (a.wy + b.wy) / 2 + (snapHeight('peek') / 2) / k, s: k };
 }
-renderLegend();
 requestAnimationFrame(frame);
 pollTrains(); pollStatus();
 setInterval(pollTrains, 15_000);

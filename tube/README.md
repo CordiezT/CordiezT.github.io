@@ -16,11 +16,11 @@ The Node server in `server/` is optional, for local development. It still expose
 
 | Layer | File | Role |
 |---|---|---|
-| Ingestion | `public/data.js` | Fetches TfL from the browser; one cached arrivals snapshot feeds the trains and every station panel |
+| Ingestion | `public/data-worker.js` (via `public/data.js`) | Fetches and parses TfL in a Web Worker, so the animation never stalls; one cached arrivals snapshot feeds the trains and every station board |
 | Reconstruction | `public/shared/reconstruct.mjs` | Turns predictions into trains: `from` station, then upcoming stops with times |
 | Network | `scripts/build-network.mjs` | Stations and track edges from TfL (cached in `scripts/.cache`, `--refresh` to re-download) |
 | Layout | `scripts/layout.mjs` | Octilinear schematic layout, computed offline |
-| Rendering | `public/model.js`, `public/app.js` | Canvas renderer (cached map layer + live trains), gestures, panels |
+| Rendering & UI | `public/model.js`, `public/app.js` | Canvas renderer (cached map + label layers, live trains every frame), map-style label placement, gestures, search, bottom sheet |
 | Home-screen app | `public/manifest.webmanifest`, `public/sw.js`, `public/icons/` | Install to Home Screen, offline-cached app shell |
 
 ## What the TfL data actually provides (tested Nov 2026)
