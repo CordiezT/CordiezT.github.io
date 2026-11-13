@@ -9,7 +9,8 @@
 
 import { writeFile, readFile, mkdir } from 'node:fs/promises';
 import { LINES } from '../public/shared/lines.mjs';
-import { schematicLayout } from './layout.mjs';
+import { schematicLayout, anchoredLayout } from './layout.mjs';
+import { ANCHORS, RIVER, UNIT } from './anchors.mjs';
 import { loadThames, simplify } from './river.mjs';
 
 const KEY = process.env.TFL_APP_KEY ? `&app_key=${process.env.TFL_APP_KEY}` : '';
@@ -113,7 +114,21 @@ for (const line of lines) {
   for (const [a, b] of line.edges) { deg.set(a, (deg.get(a) || 0) + 1); deg.set(b, (deg.get(b) || 0) + 1); }
   for (const [id, d] of deg) if (d === 1) stations.get(id).forceKey = true;
 }
-schematicLayout(list, E);
+// Hand-anchored schematic (see anchors.mjs); `--auto` uses the fully automatic layout.
+const useAnchors = !process.argv.includes('--auto');
+if (useAnchors) {
+  const byKey = new Map();
+  for (const s of list) { byKey.set(s.id, s); if (!byKey.has(s.name)) byKey.set(s.name, s); }
+  const anchors = new Map();
+  for (const [k, [gx, gy]] of Object.entries(ANCHORS)) {
+    const s = byKey.get(k);
+    if (!s) throw new Error(`anchors: no station "${k}"`);
+    anchors.set(s, [gx * UNIT, gy * UNIT]);
+  }
+  anchoredLayout(list, E, anchors);
+} else {
+  schematicLayout(list, E);
+}
 
 // --- The Thames -------------------------------------------------------------
 // Schematic mode: a smooth curve threaded between stations on opposite banks
@@ -126,7 +141,7 @@ const st = n => { const s = byName.get(n); if (!s) throw new Error(`river: unkno
 const mid = (n, sth) => ({ x: (st(n).x + st(sth).x) / 2, y: (st(n).y + st(sth).y) / 2 });
 const off = (n, dx, dy) => ({ x: st(n).x + dx, y: st(n).y + dy }); // river passes at this offset from a station
 const D = 150;
-const anchors = [
+const bankAnchors = [
   off('Richmond', -D, -D),
   mid('Gunnersbury', 'Kew Gardens'),
   off('Hammersmith', 0, D * 1.2),
@@ -171,15 +186,29 @@ const resample = (pts, n) => {
   }
   return out;
 };
-const N = 160;
-const schem = resample(catmull(anchors), N);
+const N = 220;
+// Octilinear river with rounded corners (anchored layout), else the spline.
+const roundCorners = (pts, r) => {
+  const out = [pts[0]];
+  for (let i = 1; i < pts.length - 1; i++) {
+    const [p, c, n] = [pts[i - 1], pts[i], pts[i + 1]];
+    const d1 = Math.hypot(c.x - p.x, c.y - p.y), d2 = Math.hypot(n.x - c.x, n.y - c.y), rr = Math.min(r, d1 / 2, d2 / 2);
+    const a = { x: c.x - (c.x - p.x) / d1 * rr, y: c.y - (c.y - p.y) / d1 * rr }, b = { x: c.x + (n.x - c.x) / d2 * rr, y: c.y + (n.y - c.y) / d2 * rr };
+    for (let k = 0; k <= 8; k++) { const t = k / 8; out.push({ x: (1 - t) ** 2 * a.x + 2 * (1 - t) * t * c.x + t * t * b.x, y: (1 - t) ** 2 * a.y + 2 * (1 - t) * t * c.y + t * t * b.y }); }
+  }
+  out.push(pts[pts.length - 1]);
+  return out;
+};
+const schem = useAnchors
+  ? resample(roundCorners(RIVER.map(([x, y]) => ({ x: x * UNIT, y: y * UNIT })), UNIT * 1.2), N)
+  : resample(catmull(bankAnchors), N);
 // Geographic course, trimmed to the same stretch (Richmond → Barking).
 const geoAll = (await loadThames(process.argv.includes('--refresh')))
   .map(([lon, lat]) => ({ x: (lon - LON0) * K * 111320, y: -(lat - LAT0) * 110540, lon }))
   .filter(p => p.lon > -0.32 && p.lon < 0.10);
 const geo = resample(geoAll, N);
 const river = schem.map((p, i) => ({ x: p.x, y: p.y, gx: geo[i].x, gy: geo[i].y }));
-console.log(`thames: ${river.length} points (schematic from ${anchors.length} bank anchors; geographic from OpenStreetMap)`);
+console.log(`thames: ${river.length} points (${useAnchors ? 'hand-drawn' : 'bank-threaded'} schematic; geographic from OpenStreetMap)`);
 {
   // Every station within 1.5 km of the real river must be on the same bank in the schematic.
   const sideOf = (pts, X, Y, px, py) => {

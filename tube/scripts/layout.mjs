@@ -33,6 +33,30 @@ export function schematicLayout(list, edges, { log = true } = {}) {
   if (process.env.TRACE) for (const s of list) if (s.name.includes(process.env.TRACE)) console.log(s.name, 'anchor', s.ax|0, s.ay|0, 'relaxed', s.rx|0, s.ry|0, 'final', s.x|0, s.y|0);
 }
 
+// Hand-anchored layout: pinned stations come from scripts/anchors.mjs; the
+// stations between them are routed exactly like in the automatic layout.
+// `anchors` maps station -> [x, y] in world units.
+export function anchoredLayout(list, edges, anchors, { log = true } = {}) {
+  for (const s of list) { s.ax = s.x; s.ay = s.y; }
+  const pinned = list.filter(s => anchors.has(s));
+  for (const s of pinned) { [s.x, s.y] = anchors.get(s); s.rx = s.x; s.ry = s.y; s.forceKey = true; }
+  // Unpinned stations: a reference position in the anchor frame (moved with
+  // their nearest anchors), only used to decide which way a route bends.
+  for (const s of list) {
+    if (anchors.has(s)) continue;
+    const near = pinned.map(a => [a, (a.ax - s.ax) ** 2 + (a.ay - s.ay) ** 2]).sort((a, b) => a[1] - b[1]).slice(0, 4);
+    let wx = 0, wy = 0, ws = 0;
+    for (const [a, d2] of near) { const w = 1 / (d2 + 1e4); wx += (a.x - a.ax) * w; wy += (a.y - a.ay) * w; ws += w; }
+    s.rx = s.x = s.ax + wx / ws; s.ry = s.y = s.ay + wy / ws;
+  }
+  const chains = buildChains(list, edges);
+  const loose = [...new Set(chains.flatMap(c => [c.nodes[0], c.nodes[c.nodes.length - 1]]))].filter(s => !anchors.has(s));
+  if (loose.length) console.warn('anchors: unpinned junctions/termini (placed approximately): ' + loose.map(s => s.name).join(', '));
+  placeChains(chains);
+  separate(list, edges, chains);
+  if (log) report(list, edges, chains);
+}
+
 // ---------------------------------------------------------------------------
 
 function snapAngle(dx, dy) {

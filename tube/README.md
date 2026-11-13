@@ -19,7 +19,7 @@ The Node server in `server/` is optional, for local development. It still expose
 | Ingestion | `public/data-worker.js` (via `public/data.js`) | Fetches and parses TfL in a Web Worker, so the animation never stalls; one cached arrivals snapshot feeds the trains and every station board |
 | Reconstruction | `public/shared/reconstruct.mjs` | Turns predictions into trains: `from` station, then upcoming stops with times |
 | Network | `scripts/build-network.mjs` | Stations and track edges from TfL (cached in `scripts/.cache`, `--refresh` to re-download) |
-| Layout | `scripts/layout.mjs` | Octilinear schematic layout, computed offline |
+| Layout | `scripts/anchors.mjs`, `scripts/layout.mjs` | Hand-placed anchors (junctions, termini, interchanges) in the style of the official diagram; stations between them routed automatically. `--auto` builds the fully automatic layout instead |
 | Rendering & UI | `public/model.js`, `public/app.js` | Canvas renderer (cached map + label layers, live trains every frame), map-style label placement, gestures, search, bottom sheet |
 | Home-screen app | `public/manifest.webmanifest`, `public/sw.js`, `public/icons/` | Install to Home Screen, offline-cached app shell |
 
@@ -52,11 +52,12 @@ How estimates are shown:
 
 ## Schematic layout
 
-Built offline in `scripts/layout.mjs`:
+The schematic is anchored by hand. `scripts/anchors.mjs` pins about 120 stations on a grid modelled on the official Tube diagram: every junction, terminus and major interchange, plus enough central stations to fix the classic shapes (the Circle loop, the straight Central line, the Bakerloo diagonal). Neighbouring anchors are aligned so the track between them is horizontal, vertical or 45°.
 
-1. **Projection.** Stations are projected around Charing Cross with logarithmic radial compression (`LAYOUT_R`, default 3500 m) to make room for central London.
-2. **Relaxation.** A force-based pass nudges edges towards 45° multiples.
-3. **Skeleton.** The network is split into *chains*: runs of stations between junctions or line termini. Only the chain ends are optimised. Direct links are snapped to exact 45° multiples in a fixed direction, so stations can't swap sides (Ealing Broadway stays west of Ealing Common). Two links leaving the same station never share a direction.
-4. **Routing.** Each chain is drawn as a straight run, an L, Z or S route, or a detour. The detour is only used when two chains share both end stations, such as the Hainault loop. A station sits on every bend, so each drawn segment is exactly 45° or 90°. Routes are scored on staying close to the real shape, overlap with already-drawn lines, crossings and the number of bends.
+The ~150 stations between anchors are placed by `scripts/layout.mjs`. Each run between two anchors is drawn straight, as an L, or as a detour when two routes share both ends, with a station on every bend. Routes are scored to avoid overlaps and crossings, and stations are pushed clear of tracks that don't serve them.
 
-The build prints diagnostics. Currently: 299 of 312 segments on exact angles, 12 crossings, minimum station spacing 125.
+The Thames is drawn on the same grid, in 45°/90° runs with rounded corners. Every build checks that each station within 1.5 km of the real river (from OpenStreetMap) is on the correct bank.
+
+Current diagnostics: 306/312 segments octilinear, no stations on foreign tracks, no overlapping tracks, all 59 riverside stations on the correct bank.
+
+`node scripts/build-network.mjs --auto` still produces the earlier fully automatic, geography-driven layout.

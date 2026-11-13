@@ -18,6 +18,10 @@
 <!-- Paint the right background immediately, before the stylesheet and map load (no white flash). -->
 <style>html{background:#f4f3ef}@media (prefers-color-scheme:dark){html:not([data-theme=light]){background:#101114}}html[data-theme=dark]{background:#101114}</style>
 <script>try{var t=localStorage.getItem('tube-theme');if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<!-- Loaded without blocking first paint; the map re-renders labels once it arrives. -->
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Hammersmith+One&display=swap" media="print" onload="this.media='all'">
 <link rel="stylesheet" href="style.css">
 <link rel="modulepreload" href="model.js">
 </head>

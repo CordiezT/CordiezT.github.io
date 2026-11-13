@@ -45,6 +45,8 @@ function readTheme() {
   state.theme = effectiveTheme();
   state.colors = { bg: cs.getPropertyValue('--bg').trim(), fg: cs.getPropertyValue('--fg').trim(), dim: cs.getPropertyValue('--dim').trim(), river: cs.getPropertyValue('--river').trim() };
   invalidate?.();
+  // If the stylesheet hasn't applied yet the tokens are empty: try again shortly.
+  if (!state.colors.bg) { setTimeout(readTheme, 80); state.colors = { bg: '#0f1013', fg: '#ececed', dim: '#8b8d92', river: '#17212a' }; }
   for (const l of model.lines) l.c = state.theme === 'dark' && l.dark ? l.dark : l.color;
   document.querySelector('meta[name=theme-color]').content = state.colors.bg;
   renderLegend();
@@ -224,6 +226,17 @@ function worldPos(tr, t) {
 // ---------------------------------------------------------------------------
 // Rendering
 
+// Station names use Hammersmith One, an open typeface in the spirit of TfL's
+// Johnston; the system font is the fallback until it has loaded.
+const LABEL_FONT = '"Hammersmith One", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif';
+// The stylesheet loads asynchronously, so keep asking until the face exists.
+(function waitForFont(tries = 0) {
+  document.fonts?.load('13px "Hammersmith One"').then(faces => {
+    if (faces.length) { labelWidths.clear(); invalidate(); lastSheetHTML = ''; }
+    else if (tries < 20) setTimeout(() => waitForFont(tries + 1), 300);
+  }).catch(() => {});
+})();
+
 const labelWidths = new Map();
 function measure(g, text, font) {
   const k = font + text;
@@ -354,6 +367,7 @@ function renderBase() {
   // Stations.
   stationHits = [];
   const onScreen = [];
+  const ticks = [];
   for (const s of model.stations.values()) {
     const vis = s.lines.filter(id => !state.hidden.has(id));
     if (!vis.length) continue;
@@ -369,26 +383,39 @@ function renderBase() {
       g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill(); g.stroke();
       hit = { s, ox: 0, oy: 0, r: r + 3 };
     } else {
+      // Ordinary stations get a tick, termini a bar across the line, as on the
+      // Tube map. Ticks are drawn after the labels so they can point at them.
       const id = vis[0], l = model.lineById.get(id), o = l.vofs.get(s.id) || [0, 0];
       const px = x + o[0] * gap, py = y + o[1] * gap;
-      if (s.terminal) {
-        const r = Math.max(2.6, lw * 1.15);
-        g.fillStyle = l.c; g.beginPath(); g.arc(px, py, r, 0, Math.PI * 2); g.fill();
-        g.fillStyle = bg; g.beginPath(); g.arc(px, py, r * 0.42, 0, Math.PI * 2); g.fill();
-        hit = { s, ox: o[0], oy: o[1], r: r + 4 };
-      } else {
-        const r = Math.max(1.5, lw * 0.75);
-        g.fillStyle = bg; g.strokeStyle = l.c; g.lineWidth = Math.max(1, lw * 0.5);
-        g.beginPath(); g.arc(px, py, r, 0, Math.PI * 2); g.fill(); g.stroke();
-        hit = { s, ox: o[0], oy: o[1], r: r + 5 };
-      }
+      const nb = (l.adj.get(s.id) || []).map(n => model.stations.get(n));
+      let dx = 1, dy = 0;
+      if (nb.length >= 2) { dx = nb[1].wx - nb[0].wx; dy = nb[1].wy - nb[0].wy; }
+      else if (nb.length === 1) { dx = nb[0].wx - s.wx; dy = nb[0].wy - s.wy; }
+      const dl = Math.hypot(dx, dy) || 1;
+      const len = Math.max(3, lw * 1.25);
+      ticks.push({ s, px, py, nx: -dy / dl, ny: dx / dl, c: l.c, len, terminal: s.terminal, a: g.globalAlpha });
+      hit = { s, ox: o[0], oy: o[1], r: len + 4 };
     }
     stationHits.push(hit);
     if (x > -20 && y > -20 && x < W + 20 && y < H + 20) onScreen.push({ ...hit, x: x + hit.ox * gap, y: y + hit.oy * gap });
   }
   g.globalAlpha = 1;
 
-  drawLabels(lctx, onScreen, segs, lw);
+  const placed = drawLabels(lctx, onScreen, segs, lw);
+  g.lineCap = 'butt';
+  for (const t of ticks) {
+    g.globalAlpha = t.a; g.strokeStyle = t.c; g.lineWidth = Math.max(1.6, lw * 0.9);
+    // Point the tick towards the station's label when it has one.
+    let sgn = 1;
+    const r = placed.get(t.s);
+    if (r) sgn = Math.sign((r.x + r.w / 2 - t.px) * t.nx + (r.y + r.h / 2 - t.py) * t.ny) || 1;
+    const from = t.terminal ? -t.len : 0;
+    g.beginPath();
+    g.moveTo(t.px + t.nx * from * sgn, t.py + t.ny * from * sgn);
+    g.lineTo(t.px + t.nx * t.len * sgn, t.py + t.ny * t.len * sgn);
+    g.stroke();
+  }
+  g.lineCap = 'round'; g.globalAlpha = 1;
   baseCam = { ...state.cam };
   baseDirty = false;
 }
@@ -418,7 +445,7 @@ function drawLabels(g, hits, segs, lw) {
   const z = state.cam.s / refFit();
   const small = state.W < 640;
   const fs = small ? 12 : Math.round(Math.min(13, 11 + Math.max(0, z - 1) * 0.5));
-  const font = `500 ${fs}px -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, "Helvetica Neue", Arial, sans-serif`;
+  const font = `${fs + 1}px ${LABEL_FONT}`;
   const selSt = state.sel?.type === 'station' ? model.stations.get(state.sel.id) : null;
 
   const CELL = 48;
@@ -461,6 +488,7 @@ function drawLabels(g, hits, segs, lw) {
 
   g.font = font; g.textBaseline = 'middle'; g.textAlign = 'left'; g.lineJoin = 'round';
   const hgt = fs + 3;
+  const placedLabels = new Map();
   for (const { h, pri } of cands) {
     const w = measure(g, h.s.name, font), off = h.r + 3, d = off * 0.75;
     const opts = [
@@ -474,7 +502,10 @@ function drawLabels(g, hits, segs, lw) {
     if (!r && pri >= 20) r = opts.find(o => !hitsHard(o) && !hitsMark(o, h.s)) || opts.find(o => !hitsHard(o));
     if (!r && pri >= 1000) r = opts[0];
     if (!r) continue;
-    addTo(hard, r, r);
+    // Reserve a little air around each name so neighbours never run together.
+    const air = { x: r.x - 6, y: r.y - 2, w: r.w + 12, h: r.h + 4 };
+    addTo(hard, air, air);
+    placedLabels.set(h.s, r);
     g.globalAlpha = Math.max(0.25, Math.max(...h.s.lines.map(lineAlpha)));
     // A soft glow in the background colour instead of a hard outline: it
     // lifts the text off any line behind it without looking stroked.
@@ -486,6 +517,7 @@ function drawLabels(g, hits, segs, lw) {
     g.fillText(h.s.name, r.x, r.y + hgt / 2);
   }
   g.globalAlpha = 1;
+  return placedLabels;
 }
 
 // Keep the network on screen.
@@ -544,6 +576,17 @@ function frame(tms) {
 
 // --- Live layer: selected route, trains, selection rings ---------------------
 
+// White or near-black, whichever reads better on a line colour.
+const onColorCache = new Map();
+function onColor(hex) {
+  if (!onColorCache.has(hex)) {
+    const n = parseInt(hex.slice(1), 16), r = (n >> 16) / 255, g = ((n >> 8) & 255) / 255, b = (n & 255) / 255;
+    const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    onColorCache.set(hex, lum > 0.6 ? '#141518' : '#ffffff');
+  }
+  return onColorCache.get(hex);
+}
+
 function capsule(g, x, y, hx, hy, L, Wd) {
   const r = Wd / 2, h = Math.max(0, L / 2 - r);
   const ang = Math.atan2(hy, hx);
@@ -583,7 +626,7 @@ function drawLive(tms) {
 
   // Trains: compute positions, then draw in batches (one path per line).
   trainScreen = [];
-  const tw = Math.min(13, Math.max(4, lw * 1.9)), tl = tw * 1.75; // grow with zoom so trains stay visible on thick lines
+  const tw = Math.min(13, Math.max(4.5, lw * 2)), tl = tw * 1.9; // grow with zoom so trains stay visible on thick lines
   const batches = new Map(); // line|uncertain -> [{x,y,hx,hy}]
   const singles = [];
   for (const tr of state.trains.values()) {
@@ -623,12 +666,21 @@ function drawLive(tms) {
     g.lineWidth = 1.6; g.strokeStyle = bg; g.stroke();
     if (uncertain) { g.fillStyle = bg; g.fill(); g.lineWidth = 1.3; g.strokeStyle = c; g.stroke(); }
     else { g.fillStyle = c; g.fill(); }
-    // Nose dot shows direction, but only once trains are big enough to read it.
-    if (Wd < 7) return;
+    // A chevron shows the direction of travel.
+    if (Wd < 4.5) return;
+    const fwd = L * 0.16, back = Wd * 0.30, half = Wd * 0.26;
     g.beginPath();
-    const nr = Wd * 0.22, no = L / 2 - Wd / 2;
-    for (const it of items) { g.moveTo(it.x + it.hx * no + nr, it.y + it.hy * no); g.arc(it.x + it.hx * no, it.y + it.hy * no, nr, 0, Math.PI * 2); }
-    g.fillStyle = uncertain ? c : bg; g.globalAlpha = alpha * 0.9; g.fill();
+    for (const it of items) {
+      const tx = it.x + it.hx * fwd, ty = it.y + it.hy * fwd;
+      const bx = tx - it.hx * back, by = ty - it.hy * back;
+      g.moveTo(bx - it.hy * half, by + it.hx * half);
+      g.lineTo(tx, ty);
+      g.lineTo(bx + it.hy * half, by - it.hx * half);
+    }
+    g.lineCap = 'round'; g.lineJoin = 'round';
+    g.lineWidth = Math.max(1.1, Wd * 0.17);
+    g.strokeStyle = uncertain ? c : onColor(c);
+    g.stroke();
   };
   for (const [key, items] of batches) { const [lid, u] = key.split('|'); drawSet(items, lid, !!u, tl, tw, 1); }
   for (const it of singles) {
