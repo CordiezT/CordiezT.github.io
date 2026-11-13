@@ -7,6 +7,7 @@
   --sheet: rgba(250, 249, 246, 0.92); --line: rgba(0, 0, 0, 0.08); --hover: rgba(0, 0, 0, 0.045);
   --shadow: 0 10px 40px rgba(0, 0, 0, 0.10), 0 1px 3px rgba(0, 0, 0, 0.08);
   --live: #12945a; --warn: #c97c00; --bad: #cf3527;
+  --river: #dde7ec;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
@@ -15,6 +16,7 @@
     --sheet: rgba(26, 27, 31, 0.92); --line: rgba(255, 255, 255, 0.08); --hover: rgba(255, 255, 255, 0.05);
     --shadow: 0 10px 40px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.3);
     --live: #3fd08a; --warn: #f0a530; --bad: #ff6455;
+    --river: #17212a;
     color-scheme: dark;
   }
 }
@@ -23,6 +25,7 @@
   --sheet: rgba(26, 27, 31, 0.92); --line: rgba(255, 255, 255, 0.08); --hover: rgba(255, 255, 255, 0.05);
   --shadow: 0 10px 40px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.3);
   --live: #3fd08a; --warn: #f0a530; --bad: #ff6455;
+  --river: #17212a;
   color-scheme: dark;
 }
 
@@ -52,6 +55,7 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 .icon { width: 40px; height: 40px; display: grid; place-items: center; color: var(--fg); }
 .icon + .icon { border-left: 1px solid var(--line); }
 .icon:active { background: var(--hover); }
+#river:not(.on) { color: var(--dim); }
 #layout-btn { display: none; }
 
 .note { right: 16px; bottom: max(14px, env(safe-area-inset-bottom)); color: var(--dim); font-size: 11px; opacity: .75; }

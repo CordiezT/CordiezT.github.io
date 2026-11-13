@@ -10,6 +10,7 @@
 import { writeFile, readFile, mkdir } from 'node:fs/promises';
 import { LINES } from '../public/shared/lines.mjs';
 import { schematicLayout } from './layout.mjs';
+import { loadThames, simplify } from './river.mjs';
 
 const KEY = process.env.TFL_APP_KEY ? `&app_key=${process.env.TFL_APP_KEY}` : '';
 const OUT = new URL('../public/data/network.json', import.meta.url);
@@ -114,6 +115,93 @@ for (const line of lines) {
 }
 schematicLayout(list, E);
 
+// --- The Thames -------------------------------------------------------------
+// Schematic mode: a smooth curve threaded between stations on opposite banks
+// (Embankment | Waterloo, Cannon Street | London Bridge, …), so every station
+// is on its real bank whatever the layout does. Geographic mode: the real
+// course from OpenStreetMap. Both are resampled to the same number of points
+// so the app can morph between them.
+const byName = new Map(list.map(s => [s.name, s]));
+const st = n => { const s = byName.get(n); if (!s) throw new Error(`river: unknown station ${n}`); return s; };
+const mid = (n, sth) => ({ x: (st(n).x + st(sth).x) / 2, y: (st(n).y + st(sth).y) / 2 });
+const off = (n, dx, dy) => ({ x: st(n).x + dx, y: st(n).y + dy }); // river passes at this offset from a station
+const D = 150;
+const anchors = [
+  off('Richmond', -D, -D),
+  mid('Gunnersbury', 'Kew Gardens'),
+  off('Hammersmith', 0, D * 1.2),
+  mid('Putney Bridge', 'East Putney'),
+  off('Battersea Power Station', 0, -D),
+  mid('Pimlico', 'Vauxhall'),
+  mid('Westminster', 'Lambeth North'),
+  mid('Embankment', 'Waterloo'),
+  mid('Blackfriars', 'Southwark'),
+  mid('Cannon Street', 'London Bridge'),
+  mid('Tower Hill', 'Bermondsey'),
+  mid('Canary Wharf', 'Canada Water'),
+  off('Canary Wharf', 0, D),
+  mid('Canary Wharf', 'North Greenwich'),
+  mid('Canning Town', 'North Greenwich'),
+  off('Barking', D, D * 2),
+];
+const catmull = (pts, per = 16) => {
+  const out = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[Math.max(0, i - 1)], p1 = pts[i], p2 = pts[i + 1], p3 = pts[Math.min(pts.length - 1, i + 2)];
+    for (let k = 0; k < per; k++) {
+      const t = k / per, t2 = t * t, t3 = t2 * t;
+      out.push({
+        x: 0.5 * (2 * p1.x + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3),
+        y: 0.5 * (2 * p1.y + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3),
+      });
+    }
+  }
+  out.push(pts[pts.length - 1]);
+  return out;
+};
+const resample = (pts, n) => {
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y));
+  const L = cum[cum.length - 1], out = [];
+  for (let k = 0, j = 0; k < n; k++) {
+    const d = (k / (n - 1)) * L;
+    while (j < pts.length - 2 && cum[j + 1] < d) j++;
+    const t = (d - cum[j]) / (cum[j + 1] - cum[j] || 1);
+    out.push({ x: pts[j].x + (pts[j + 1].x - pts[j].x) * t, y: pts[j].y + (pts[j + 1].y - pts[j].y) * t });
+  }
+  return out;
+};
+const N = 160;
+const schem = resample(catmull(anchors), N);
+// Geographic course, trimmed to the same stretch (Richmond → Barking).
+const geoAll = (await loadThames(process.argv.includes('--refresh')))
+  .map(([lon, lat]) => ({ x: (lon - LON0) * K * 111320, y: -(lat - LAT0) * 110540, lon }))
+  .filter(p => p.lon > -0.32 && p.lon < 0.10);
+const geo = resample(geoAll, N);
+const river = schem.map((p, i) => ({ x: p.x, y: p.y, gx: geo[i].x, gy: geo[i].y }));
+console.log(`thames: ${river.length} points (schematic from ${anchors.length} bank anchors; geographic from OpenStreetMap)`);
+{
+  // Every station within 1.5 km of the real river must be on the same bank in the schematic.
+  const sideOf = (pts, X, Y, px, py) => {
+    let best = Infinity, sgn = 0;
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1], b = pts[i], dx = b[X] - a[X], dy = b[Y] - a[Y], L2 = dx * dx + dy * dy || 1;
+      const t = Math.max(0, Math.min(1, ((px - a[X]) * dx + (py - a[Y]) * dy) / L2));
+      const d = Math.hypot(px - a[X] - dx * t, py - a[Y] - dy * t);
+      if (d < best) { best = d; sgn = Math.sign(dx * (py - a[Y]) - dy * (px - a[X])); }
+    }
+    return { sgn, d: best };
+  };
+  const wrong = [], checked = [];
+  for (const s of list) {
+    const g = sideOf(geoAll, 'x', 'y', s.gx, s.gy);
+    if (g.d > 1500) continue;
+    checked.push(s.name);
+    if (sideOf(river, 'x', 'y', s.x, s.y).sgn !== g.sgn) wrong.push(s.name);
+  }
+  console.log(`thames: ${checked.length} riverside stations checked; ${wrong.length ? 'WRONG BANK: ' + wrong.join(', ') : 'all on the correct bank'}`);
+}
+
 const round = v => Math.round(v);
 const out = {
   generated: new Date().toISOString(),
@@ -124,6 +212,8 @@ const out = {
     x: round(s.x), y: round(s.y), gx: round(s.gx), gy: round(s.gy),
   })).sort((a, b) => a.name.localeCompare(b.name)),
   lines: lines.map(l => ({ id: l.id, name: l.name, color: l.color, edges: l.edges, routes: l.routes })),
+  river: river.map(p => [round(p.x), round(p.y), round(p.gx), round(p.gy)]),
+  attribution: 'Station and route data: TfL Open Data. River Thames: © OpenStreetMap contributors (ODbL).',
 };
 await mkdir(new URL('.', OUT), { recursive: true });
 await writeFile(OUT, JSON.stringify(out));

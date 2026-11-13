@@ -24,6 +24,7 @@ const state = {
   theme: null, colors: {},
   morph: null,
   q: '',               // search query
+  river: true,         // minimalist Thames background
 };
 const now = () => Date.now() + state.clockOffset;
 
@@ -42,7 +43,8 @@ function effectiveTheme() {
 function readTheme() {
   const cs = getComputedStyle(document.documentElement);
   state.theme = effectiveTheme();
-  state.colors = { bg: cs.getPropertyValue('--bg').trim(), fg: cs.getPropertyValue('--fg').trim(), dim: cs.getPropertyValue('--dim').trim() };
+  state.colors = { bg: cs.getPropertyValue('--bg').trim(), fg: cs.getPropertyValue('--fg').trim(), dim: cs.getPropertyValue('--dim').trim(), river: cs.getPropertyValue('--river').trim() };
+  invalidate?.();
   for (const l of model.lines) l.c = state.theme === 'dark' && l.dark ? l.dark : l.color;
   document.querySelector('meta[name=theme-color]').content = state.colors.bg;
   renderLegend();
@@ -261,7 +263,7 @@ function baseStateKey() {
   const selLine = state.sel?.type === 'train' ? state.trains.get(state.sel.id)?.raw.line : '';
   return [state.W, state.H, state.dpr, state.theme, state.focus, [...state.hidden].join(), selLine,
     state.sel?.type === 'station' ? state.sel.id : '', state.hover?.s?.id || '', model.layout,
-    snap, $('sheet').offsetHeight].join('|');
+    snap, $('sheet').offsetHeight, state.river].join('|');
 }
 
 // Screen position of a station on a given line (with parallel-line offset).
@@ -298,6 +300,21 @@ function renderBase() {
   const x0 = -MARGIN * W - 40, y0 = -MARGIN * H - 40, x1 = W * (1 + MARGIN) + 40, y1 = H * (1 + MARGIN) + 40;
 
   // Lines, with rounded corners at bends.
+  // The Thames: a soft, wide band under everything (optional).
+  if (state.river && model.river.length > 1) {
+    const pts = model.river.map(([x, y]) => [sx(x), sy(y)]);
+    g.strokeStyle = state.colors.river;
+    g.lineWidth = Math.min(70, Math.max(7, state.cam.s * 120));
+    g.beginPath();
+    g.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length - 1; i++) {
+      const mx = (pts[i][0] + pts[i + 1][0]) / 2, my = (pts[i][1] + pts[i + 1][1]) / 2;
+      g.quadraticCurveTo(pts[i][0], pts[i][1], mx, my);
+    }
+    g.lineTo(pts[pts.length - 1][0], pts[pts.length - 1][1]);
+    g.stroke();
+  }
+
   const corner = Math.max(4, lw * 3);
   const segs = []; // screen-space line segments: obstacles for labels
   for (const l of model.lines) {
@@ -401,7 +418,7 @@ function drawLabels(g, hits, segs, lw) {
   const z = state.cam.s / refFit();
   const small = state.W < 640;
   const fs = small ? 12 : Math.round(Math.min(13, 11 + Math.max(0, z - 1) * 0.5));
-  const font = `600 ${fs}px -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, "Helvetica Neue", Arial, sans-serif`;
+  const font = `500 ${fs}px -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, "Helvetica Neue", Arial, sans-serif`;
   const selSt = state.sel?.type === 'station' ? model.stations.get(state.sel.id) : null;
 
   const CELL = 48;
@@ -459,8 +476,13 @@ function drawLabels(g, hits, segs, lw) {
     if (!r) continue;
     addTo(hard, r, r);
     g.globalAlpha = Math.max(0.25, Math.max(...h.s.lines.map(lineAlpha)));
-    g.lineWidth = 4; g.strokeStyle = state.colors.bg; g.fillStyle = state.colors.fg;
-    g.strokeText(h.s.name, r.x, r.y + hgt / 2);
+    // A soft glow in the background colour instead of a hard outline: it
+    // lifts the text off any line behind it without looking stroked.
+    g.fillStyle = state.colors.fg;
+    g.shadowColor = state.colors.bg; g.shadowBlur = 5 * state.dpr;
+    g.fillText(h.s.name, r.x, r.y + hgt / 2);
+    g.fillText(h.s.name, r.x, r.y + hgt / 2);
+    g.shadowBlur = 0; g.shadowColor = 'transparent';
     g.fillText(h.s.name, r.x, r.y + hgt / 2);
   }
   g.globalAlpha = 1;
@@ -585,7 +607,7 @@ function drawLive(tms) {
     const side = lw * 0.45; // keep left, like the trains themselves
     const x = sx(wx) + pos.ox * gap + hy * side, y = sy(wy) + pos.oy * gap - hx * side;
     if (x < -20 || y < -20 || x > state.W + 20 || y > state.H + 20) continue;
-    trainScreen.push({ tr, x, y });
+    trainScreen.push({ tr, x, y, hx, hy, L: tr === selTrain ? tl * 1.3 : tl, W: tr === selTrain ? tw * 1.3 : tw });
     const item = { x, y, hx, hy, a, tr };
     if (tr === selTrain || a < 0.98) singles.push(item);
     else {
@@ -695,7 +717,7 @@ function endPointer(e) {
   if (!gesture) return;
   if (gesture.type === 'pinch') {
     // Lifting one finger continues as a pan from the remaining one.
-    if (pointers.size === 1) startPan([...pointers.values()][0], true);
+    if (pointers.size === 1) { startPan([...pointers.values()][0], true); gesture.afterPinch = true; }
     else if (pointers.size === 0) gesture = null;
     return;
   }
@@ -703,16 +725,18 @@ function endPointer(e) {
   const g = gesture; gesture = null;
   const tnow = performance.now();
   if (!g.moved && tnow - g.t0 < 450) {
-    if (touchInput && lastTap && tnow - lastTap.t < 320 && Math.hypot(lastTap.x - e.clientX, lastTap.y - e.clientY) < 30) {
+    // Double-tap zooms only on empty map: two quick taps on a train or a
+    // station should not make the whole map jump.
+    if (touchInput && lastTap?.empty && tnow - lastTap.t < 320 && Math.hypot(lastTap.x - e.clientX, lastTap.y - e.clientY) < 30) {
       lastTap = null;
-      zoomTo(e.clientX, e.clientY, 2.2);
+      zoomTo(e.clientX, e.clientY, 2);
       return;
     }
-    lastTap = { t: tnow, x: e.clientX, y: e.clientY };
+    lastTap = { t: tnow, x: e.clientX, y: e.clientY, empty: !pick(e.clientX, e.clientY) };
     clickAt(e.clientX, e.clientY);
     return;
   }
-  if (g.moved && samples.length > 1) {
+  if (g.moved && !g.afterPinch && samples.length > 1) {
     const a = samples[0], b = samples[samples.length - 1], dt = b.t - a.t;
     if (dt > 0 && tnow - b.t < 60) {
       const vx = (b.x - a.x) / dt, vy = (b.y - a.y) / dt;
@@ -752,20 +776,26 @@ canvas.addEventListener('wheel', e => {
 
 canvas.addEventListener('dblclick', e => { if (!touchInput) zoomTo(e.clientX, e.clientY, 2.2, 450); });
 
+// Hit-testing measures the distance to the edge of what is drawn (a train's
+// capsule, a station's ring), so whatever is actually under the finger wins.
+// Trains standing in a station are therefore just as tappable as the station.
 function pick(x, y) {
   const { gap } = sizes();
-  let train = null, td = Infinity, station = null, sd = Infinity;
+  const slack = touchInput ? 14 : 5;
+  let best = null, bd = Infinity;
   for (const h of trainScreen) {
-    const d = Math.hypot(h.x - x, h.y - y);
-    if (d < (touchInput ? 20 : 11) && d < td) { td = d; train = { type: 'train', tr: h.tr }; }
+    const half = Math.max(0, h.L / 2 - h.W / 2);
+    const t = Math.max(-half, Math.min(half, (x - h.x) * h.hx + (y - h.y) * h.hy));
+    const d = Math.hypot(x - (h.x + h.hx * t), y - (h.y + h.hy * t)) - h.W / 2;
+    if (d < slack && d < bd) { bd = d; best = { type: 'train', tr: h.tr }; }
   }
   for (const h of stationHits) {
-    const d = Math.hypot(sx(h.s.wx) + h.ox * gap - x, sy(h.s.wy) + h.oy * gap - y);
-    if (d < Math.max(touchInput ? 16 : 9, h.r) && d < sd) { sd = d; station = { type: 'station', s: h.s }; }
+    const r = Math.max(2, h.r - 4); // drawn radius (hit radius includes padding)
+    const d = Math.hypot(sx(h.s.wx) + h.ox * gap - x, sy(h.s.wy) + h.oy * gap - y) - r;
+    // Ties go to the train (it's drawn on top); stations need to be strictly closer.
+    if (d < slack && d < bd - 1) { bd = d; best = { type: 'station', s: h.s }; }
   }
-  // Trains sitting in a station shouldn't make the station unclickable.
-  if (train && station) return td < (touchInput ? 8 : 4) && td < sd ? train : station;
-  return train || station;
+  return best;
 }
 
 function hoverAt(x, y) {
@@ -804,12 +834,23 @@ function setLayout(mode) {
   flyTo(target, 900);
 }
 $('fit').onclick = () => flyTo(fitCam());
+try { state.river = localStorage.getItem('tube-river') !== '0'; } catch {}
+const syncRiverBtn = () => { $('river').classList.toggle('on', state.river); $('river').setAttribute('aria-pressed', state.river); };
+syncRiverBtn();
+$('river').onclick = () => { state.river = !state.river; syncRiverBtn(); try { localStorage.setItem('tube-river', state.river ? '1' : '0'); } catch {} };
 document.querySelectorAll('[data-layout]').forEach(btn => btn.onclick = () => setLayout(btn.dataset.layout));
 $('layout-btn').onclick = () => setLayout(model.layout === 'geo' ? 'schematic' : 'geo');
 addEventListener('keydown', e => {
   if (e.key === 'Escape') { if (state.q) { $('q').value = ''; state.q = ''; renderSheet(); } else if (state.sel) closeDetail(); }
 });
-addEventListener('resize', () => { resize(); state.fitScale = fitCam().s; invalidate(); setSnap(snap, false); });
+// iOS Safari changes the viewport height whenever its toolbars show or hide;
+// only a width change (rotation, window resize) may rescale the map.
+let lastW = innerWidth;
+addEventListener('resize', () => {
+  resize();
+  if (innerWidth !== lastW) { lastW = innerWidth; const f = fitCam().s; state.cam.s *= f / state.fitScale; state.fitScale = f; }
+  invalidate(); setSnap(snap, false);
+});
 
 // ---------------------------------------------------------------------------
 // The sheet: search, service status, lines, and station / train / line detail.
@@ -894,7 +935,7 @@ function revealAbove(wx, wy) {
   const left = isPhone() ? 24 : 400, right = state.W - 24;
   if (y > top && y < bottom && x > left && x < right) return;
   const cx = isPhone() ? state.W / 2 : (400 + state.W) / 2, cy = (top + bottom) / 2;
-  flyTo({ s: state.cam.s, x: wx - (cx - state.W / 2) / state.cam.s, y: wy - (cy - state.H / 2) / state.cam.s }, 450);
+  flyTo({ s: state.cam.s, x: wx - (cx - state.W / 2) / state.cam.s, y: wy - (cy - state.H / 2) / state.cam.s }, 650);
 }
 
 function flyToStation(s) {
@@ -1161,3 +1202,5 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) { po
 for (const ev of ['gesturestart', 'gesturechange', 'gestureend']) document.addEventListener(ev, e => e.preventDefault());
 // Home-screen app: cache the shell so it opens instantly (needs HTTPS or localhost).
 if ('serviceWorker' in navigator && isSecureContext) navigator.serviceWorker.register('sw.js').catch(() => {});
+// Local development only: inspection handle for testing.
+if (location.hostname === 'localhost') window.__tube = { state, model, select, get trainScreen() { return trainScreen; } };

@@ -16,6 +16,8 @@ export function buildModel(network, lineDefs) {
     physical.get(k).lines.push(l.id);
   }
 
+  orientEdges(physical);
+
   // Adjacency per line.
   for (const l of lines) {
     l.adj = new Map();
@@ -29,7 +31,7 @@ export function buildModel(network, lineDefs) {
     l.chains = chains(l.adj);
   }
 
-  const model = { stations, lines, lineById: new Map(lines.map(l => [l.id, l])), physical, edgeKey, layout: 'schematic' };
+  const model = { stations, lines, lineById: new Map(lines.map(l => [l.id, l])), physical, edgeKey, layout: 'schematic', riverRaw: network.river || [] };
   model.setLayout = (mode, t = 1) => setLayout(model, mode, t);
   model.setLayout('schematic');
 
@@ -95,10 +97,44 @@ function chains(adj) {
   return out;
 }
 
+// Give every shared section a travel direction that is consistent along each
+// line (an edge leaving a station continues the edge that arrived there), so a
+// bundle of parallel lines keeps the same left-to-right order through bends
+// instead of swapping sides from one segment to the next.
+function orientEdges(physical) {
+  const byStation = new Map();
+  for (const [k, e] of physical) for (const id of [e.a, e.b]) (byStation.get(id) || byStation.set(id, []).get(id)).push(k);
+  const dir = new Map();
+  // Start from the busiest edges so the big corridors set the convention.
+  const order = [...physical.keys()].sort((x, y) => physical.get(y).lines.length - physical.get(x).lines.length);
+  for (const k0 of order) {
+    if (dir.has(k0)) continue;
+    const e0 = physical.get(k0);
+    dir.set(k0, [e0.a, e0.b]);
+    const queue = [k0];
+    while (queue.length) {
+      const k = queue.shift(), [from, to] = dir.get(k), e = physical.get(k);
+      for (const [node, leaving] of [[to, true], [from, false]]) {
+        for (const k2 of byStation.get(node)) {
+          if (dir.has(k2)) continue;
+          const e2 = physical.get(k2);
+          if (!e2.lines.some(l => e.lines.includes(l))) continue;
+          const other = e2.a === node ? e2.b : e2.a;
+          dir.set(k2, leaving ? [node, other] : [other, node]);
+          queue.push(k2);
+        }
+      }
+    }
+  }
+  for (const [k, e] of physical) e.dir = dir.get(k);
+}
+
 // World coordinates for the current layout (morphable between two layouts).
 const GEO_SCALE = 0.42;
 function setLayout(model, mode, t) {
   model.layout = mode;
+  const kk = mode === 'geo' ? t : 1 - t;
+  model.river = (model.riverRaw || []).map(([x, y, gx, gy]) => [x + (gx * GEO_SCALE - x) * kk, y + (gy * GEO_SCALE - y) * kk]);
   for (const s of model.stations.values()) {
     const sx = s.x, sy = s.y, gx = s.gx * GEO_SCALE, gy = s.gy * GEO_SCALE;
     const k = mode === 'geo' ? t : 1 - t;
@@ -113,25 +149,29 @@ function setLayout(model, mode, t) {
 function computeOffsets(model) {
   const { stations, physical, lines } = model;
   for (const e of physical.values()) {
-    const A = stations.get(e.a), B = stations.get(e.b);
-    let dx = B.wx - A.wx, dy = B.wy - A.wy;
-    // Orient consistently (eastwards / southwards) so ordering is stable along corridors.
-    let sign = dx > 1e-6 || (Math.abs(dx) <= 1e-6 && dy > 0) ? 1 : -1;
+    const A = stations.get(e.dir[0]), B = stations.get(e.dir[1]);
+    const dx = B.wx - A.wx, dy = B.wy - A.wy;
     const L = Math.hypot(dx, dy) || 1;
-    e.nx = (-dy / L) * sign; e.ny = (dx / L) * sign;
+    e.nx = -dy / L; e.ny = dx / L;
     e.ofs = new Map(e.lines.map((id, i) => [id, i - (e.lines.length - 1) / 2]));
   }
   for (const l of lines) {
     l.vofs = new Map();
     for (const [id, ns] of l.adj) {
       let ox = 0, oy = 0;
-      for (const n of ns) {
-        const e = physical.get(model.edgeKey(id, n));
-        const o = e.ofs.get(l.id);
-        ox += e.nx * o; oy += e.ny * o;
+      const vs = ns.map(n => { const e = physical.get(model.edgeKey(id, n)); const o = e.ofs.get(l.id); return [e.nx * o, e.ny * o, o, e]; });
+      if (vs.length === 2 && Math.abs(vs[0][2] - vs[1][2]) < 1e-6 && vs[0][2] !== 0) {
+        // Mitred corner: keep the full offset distance through the bend so
+        // parallel lines stay evenly spaced instead of pinching together.
+        const [a, b] = vs, o = a[2];
+        const n1x = a[3].nx, n1y = a[3].ny, n2x = b[3].nx, n2y = b[3].ny;
+        const dot = n1x * n2x + n1y * n2y;
+        const k = 1 / Math.max(0.35, 1 + dot); // cap very sharp corners
+        ox = (n1x + n2x) * o * k; oy = (n1y + n2y) * o * k;
+      } else {
+        for (const v of vs) { ox += v[0]; oy += v[1]; }
+        ox /= vs.length; oy /= vs.length;
       }
-      // Average, but keep magnitude at corners (miter-like, capped).
-      ox /= ns.length; oy /= ns.length;
       l.vofs.set(id, [ox, oy]);
     }
   }

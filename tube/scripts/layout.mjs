@@ -330,6 +330,24 @@ function placeAlong(c, path, dry = false) {
 // nudge interior (non-key) stations apart along their own chain direction.
 function separate(list, edges, chains) {
   const keySet = new Set(chains.flatMap(c => [c.nodes[0], c.nodes[c.nodes.length - 1]]));
+  // Stations sitting on (or tracks running over) a line that doesn't serve
+  // them: push the station clear of the foreign track.
+  for (let it = 0; it < 60; it++) {
+    for (const s of list) {
+      if (keySet.has(s)) continue;
+      for (const [a, b] of edges) {
+        if (a === s || b === s) continue;
+        const dx = b.x - a.x, dy = b.y - a.y, L2 = dx * dx + dy * dy || 1;
+        const t = Math.max(0, Math.min(1, ((s.x - a.x) * dx + (s.y - a.y) * dy) / L2));
+        const px = a.x + dx * t, py = a.y + dy * t, d = Math.hypot(s.x - px, s.y - py);
+        if (d >= 70 || t <= 0.02 || t >= 0.98) continue;
+        const L = Math.sqrt(L2);
+        let nx = -dy / L, ny = dx / L;
+        if ((s.x - px) * nx + (s.y - py) * ny < 0) { nx = -nx; ny = -ny; }
+        s.x += nx * (70 - d) * 0.5; s.y += ny * (70 - d) * 0.5;
+      }
+    }
+  }
   for (let it = 0; it < 40; it++) {
     for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
       const a = list[i], b = list[j];
@@ -385,7 +403,18 @@ export function report(list, edges, chains) {
     if (s === a || s === b) continue;
     if (distToSeg(s.x, s.y, a, b) < 45) onEdge.push(`${s.name} on ${a.name}–${b.name}`);
   }
-  console.log(`layout: ${chains.length} chains, ${oct}/${edges.length} edges octilinear, ${cross} crossings, ${close} pairs < 120 (min ${minD.toFixed(0)}), ${onEdge.length} stations sitting on foreign edges`);
+  // Tracks drawn on top of each other: two edges that don't share a station
+  // but run within a line-width of each other for a stretch.
+  const overlaps = [];
+  for (let i = 0; i < edges.length; i++) for (let j = i + 1; j < edges.length; j++) {
+    const [a, b] = edges[i], [c, d] = edges[j];
+    if (a === c || a === d || b === c || b === d) continue;
+    let near = 0;
+    for (let k = 1; k < 8; k++) { const t = k / 8; if (distToSeg(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, c, d) < 40) near++; }
+    if (near >= 3) overlaps.push(`${a.name}–${b.name} over ${c.name}–${d.name}`);
+  }
+  console.log(`layout: ${chains.length} chains, ${oct}/${edges.length} edges octilinear, ${cross} crossings, ${close} pairs < 120 (min ${minD.toFixed(0)}), ${onEdge.length} stations sitting on foreign edges, ${overlaps.length} overlapping tracks`);
+  if (overlaps.length) console.log('  overlap: ' + overlaps.join('\n  overlap: '));
   if (onEdge.length) console.log('  ' + onEdge.slice(0, 12).join('\n  '));
-  return { oct, cross, close, onEdge: onEdge.length };
+  return { oct, cross, close, onEdge: onEdge.length, overlaps: overlaps.length };
 }
