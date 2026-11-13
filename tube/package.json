@@ -1,0 +1,14 @@
+{
+  "name": "tube-live",
+  "private": true,
+  "type": "module",
+  "description": "Live London Underground network visualisation built on the TfL Unified API",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server/index.mjs",
+    "build:network": "node --env-file-if-exists=.env scripts/build-network.mjs",
+    "build:site": "node scripts/build-site.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

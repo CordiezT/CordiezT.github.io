@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<title>Underground Live</title>
+<meta name="description" content="The London Underground, live: every train, reconstructed from TfL arrival predictions.">
+<meta name="theme-color" content="#101114">
+<!-- Home-screen app (iOS + Android) -->
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Tube Live">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="format-detection" content="telephone=no">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
+<!-- Paint the right background immediately, before the stylesheet and map load (no white flash). -->
+<style>html{background:#f4f3ef}@media (prefers-color-scheme:dark){html:not([data-theme=light]){background:#101114}}html[data-theme=dark]{background:#101114}</style>
+<script>try{var t=localStorage.getItem('tube-theme');if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="style.css">
+<link rel="modulepreload" href="model.js">
+</head>
+<body>
+<canvas id="map" aria-label="Live map of the London Underground"></canvas>
+
+<header class="hud top-left">
+  <div class="brand">
+    <span class="roundel" aria-hidden="true"></span>
+    <span class="title">Underground <em>Live</em></span>
+  </div>
+  <div class="live" id="live"><span class="dot"></span><span id="live-text">Connecting…</span></div>
+</header>
+
+<div class="hud top-right controls">
+  <div class="seg" role="group" aria-label="Layout">
+    <button data-layout="schematic" class="on">Schematic</button>
+    <button data-layout="geo">Geographic</button>
+  </div>
+  <button id="layout-btn" class="icon mobile-only" title="Schematic / geographic" aria-label="Switch between schematic and geographic layout">
+    <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M2.5 5l5-2 5 2 5-2v12l-5 2-5-2-5 2z"/><path d="M7.5 3v12M12.5 5v12"/></svg>
+  </button>
+  <button id="theme" class="icon" title="Toggle light / dark" aria-label="Toggle theme">
+    <svg viewBox="0 0 20 20" width="16" height="16"><path d="M10 2a8 8 0 1 0 0 16V2z" fill="currentColor"/><circle cx="10" cy="10" r="7.25" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+  </button>
+  <button id="fit" class="icon" title="Fit network" aria-label="Fit network">
+    <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 7V3h4M17 7V3h-4M3 13v4h4M17 13v4h-4"/></svg>
+  </button>
+</div>
+
+<nav class="hud bottom-left legend" id="legend" aria-label="Lines"></nav>
+<button class="lines-btn mobile-only" id="lines-btn" aria-expanded="false" aria-controls="legend">Lines</button>
+
+<aside class="panel" id="panel" hidden>
+  <div class="grab" aria-hidden="true"></div>
+  <button class="close" id="panel-close" aria-label="Close">×</button>
+  <div id="panel-body"></div>
+</aside>
+
+<div class="tip" id="tip" hidden></div>
+
+<footer class="hud bottom-right note" id="note">
+  Train positions are estimated from TfL arrival predictions · Data: TfL Open Data
+</footer>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

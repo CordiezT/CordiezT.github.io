@@ -1,0 +1,10 @@
+# build output (deployed by GitHub Actions)
+dist/
+# private notes / local tooling
+achievements.md
+.claude/
+.DS_Store
+# Tube Live
+tube/.env
+tube/node_modules/
+tube/scripts/.cache/
