@@ -1,7 +1,7 @@
 // Service worker: makes the app open instantly (and offline) from the home
 // screen. The app shell and network map are cached; live data never is.
 // Paths are relative so the app works from any folder (e.g. yoursite.com/tube/).
-const VERSION = 'tube-v6';
+const VERSION = 'tube-v7';
 const SHELL = [
   './', 'index.html', 'style.css', 'app.js', 'model.js', 'data.js', 'data-worker.js', 'shared/lines.mjs', 'shared/reconstruct.mjs',
   'data/network.json', 'manifest.webmanifest', 'icons/apple-touch-icon.png', 'icons/icon-192.png',

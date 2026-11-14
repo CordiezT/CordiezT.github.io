@@ -1,4 +1,4 @@
-import { LINES } from './shared/lines.mjs';
+import { LINES, MODES } from './shared/lines.mjs';
 import { buildModel, buildTimeline, locate } from './model.js';
 import { createData } from './data.js';
 
@@ -204,15 +204,22 @@ function along(lineId, a, b, f) {
     const s = S(a), o = vo(a);
     return { x: s.wx, y: s.wy, ox: o[0], oy: o[1], hx: 0, hy: 0 };
   }
+  // Polyline through stations and any planned bends; offsets are the stations'
+  // lane offsets, fading to zero at bends (bends are only used by lone lines).
+  const pts = [];
+  for (let i = 0; i < p.length; i++) {
+    if (i) for (const [x, y] of model.edgePoints(line, p[i - 1], p[i]).slice(1, -1)) pts.push([x, y, 0, 0]);
+    const s = S(p[i]), o = vo(p[i]);
+    pts.push([s.wx, s.wy, o[0], o[1]]);
+  }
   let total = 0;
   const L = [];
-  for (let i = 1; i < p.length; i++) { const d = Math.hypot(S(p[i]).wx - S(p[i - 1]).wx, S(p[i]).wy - S(p[i - 1]).wy); L.push(d); total += d; }
+  for (let i = 1; i < pts.length; i++) { const d = Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]); L.push(d); total += d; }
   let target = f * total, i = 0;
   while (i < L.length - 1 && target > L[i]) { target -= L[i]; i++; }
-  const A = S(p[i]), B = S(p[i + 1]), k = L[i] ? Math.min(1, target / L[i]) : 0;
-  const oa = vo(p[i]), ob = vo(p[i + 1]);
-  const hx = B.wx - A.wx, hy = B.wy - A.wy, hl = Math.hypot(hx, hy) || 1;
-  return { x: A.wx + (B.wx - A.wx) * k, y: A.wy + (B.wy - A.wy) * k, ox: oa[0] + (ob[0] - oa[0]) * k, oy: oa[1] + (ob[1] - oa[1]) * k, hx: hx / hl, hy: hy / hl };
+  const A = pts[i], B = pts[i + 1], k = L[i] ? Math.min(1, target / L[i]) : 0;
+  const hx = B[0] - A[0], hy = B[1] - A[1], hl = Math.hypot(hx, hy) || 1;
+  return { x: A[0] + hx * k, y: A[1] + hy * k, ox: A[2] + (B[2] - A[2]) * k, oy: A[3] + (B[3] - A[3]) * k, hx: hx / hl, hy: hy / hl };
 }
 
 function worldPos(tr, t) {
@@ -336,7 +343,11 @@ function renderBase() {
     g.globalAlpha = a; g.strokeStyle = l.c; g.lineWidth = lw;
     g.beginPath();
     for (const ch of l.chains) {
-      const pts = ch.map(id => P(l.id, id, gap));
+      const pts = [];
+      ch.forEach((id, i) => {
+        if (i) for (const [vx, vy] of model.edgePoints(l, ch[i - 1], id).slice(1, -1)) pts.push([sx(vx), sy(vy)]);
+        pts.push(P(l.id, id, gap));
+      });
       for (let i = 1; i < pts.length; i++) segs.push([pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1]]);
       g.moveTo(pts[0][0], pts[0][1]);
       for (let i = 1; i < pts.length - 1; i++) {
@@ -351,6 +362,8 @@ function renderBase() {
       g.lineTo(last[0], last[1]);
     }
     g.stroke();
+    // Rail lines (Elizabeth, Overground, DLR): a thin centre stripe, as on the official map.
+    if (l.cased) { g.strokeStyle = bg; g.lineWidth = Math.max(0.8, lw * 0.36); g.stroke(); }
   }
   g.globalAlpha = 1;
 
@@ -619,7 +632,10 @@ function drawLive(tms) {
     if (ids.length > 1) {
       g.strokeStyle = l.c; g.globalAlpha = 0.28; g.lineWidth = lw * 3.2;
       g.beginPath();
-      ids.forEach((id, i) => { const [x, y] = P(l.id, id, gap); i ? g.lineTo(x, y) : g.moveTo(x, y); });
+      ids.forEach((id, i) => {
+        if (i) for (const [vx, vy] of model.edgePoints(l, ids[i - 1], id).slice(1, -1)) g.lineTo(sx(vx), sy(vy));
+        const [x, y] = P(l.id, id, gap); i ? g.lineTo(x, y) : g.moveTo(x, y);
+      });
       g.stroke(); g.globalAlpha = 1;
     }
   }
@@ -1110,18 +1126,36 @@ function homeHTML() {
       ? `<b>${disrupted.map(l => esc(l.name)).join(', ')}</b><span class="muted">${esc(disrupted.map(l => state.status.get(l.id)[0].text).filter((v, i, a) => a.indexOf(v) === i).join(' · '))}</span>`
       : '<b>Good service</b><span class="muted">on all Underground lines</span>'}</div></div>`;
   }
-  html += '<div class="label">Lines</div><div class="rows">';
-  for (const l of model.lines) {
+  for (const m of MODES) {
+    const ml = model.lines.filter(l => (l.mode || 'tube') === m.id);
+    if (!ml.length) continue;
+    const allOff = ml.every(l => state.hidden.has(l.id));
+    html += `<div class="label mode"><span>${esc(m.name)}</span><button class="eye" data-mode="${m.id}" aria-label="${allOff ? 'Show' : 'Hide'} ${esc(m.name)}">${allOff ? eyeOff : eyeOn}</button></div><div class="rows">`;
+    html += ml.map(lineRowHTML).join('') + '</div>';
+  }
+  html += '<p class="foot">Train positions are estimated between stations from TfL’s live arrival predictions; they are not GPS. DLR trains have no ids in TfL’s feed and are inferred from their predictions. Data: TfL Open Data; river © OpenStreetMap contributors.</p>';
+  return html;
+}
+
+function lineRowHTML(l) {
+  let html = '';
+  {
     const st = state.status.get(l.id), cls = severityClass(st), n = state.trainCounts[l.id];
     const off = state.hidden.has(l.id);
     html += `<div class="row ${off ? 'off' : ''}" data-line="${l.id}" role="button" tabindex="0">
-      <span class="sw" style="background:${l.c}"></span>
+      <span class="sw ${l.cased ? 'cased' : ''}" style="background-color:${l.c}"></span>
       <span class="main"><div class="name">${esc(l.name)}</div><div class="meta ${cls}">${esc(st?.[0]?.text || 'Status loading')}${n ? ` · ${n} trains` : ''}</div></span>
       <button class="eye" data-eye="${l.id}" aria-label="${off ? 'Show' : 'Hide'} ${esc(l.name)}">${off ? eyeOff : eyeOn}</button>
     </div>`;
   }
-  html += '</div><p class="foot">Train positions are estimated between stations from TfL’s live arrival predictions; they are not GPS. Data: TfL Open Data.</p>';
   return html;
+}
+
+// Only download the feeds of modes that have at least one visible line.
+function syncModes() {
+  const on = MODES.map(m => m.id).filter(id => model.lines.some(l => (l.mode || 'tube') === id && !state.hidden.has(l.id)));
+  data.setModes(on);
+  try { localStorage.setItem('tube-hidden', JSON.stringify([...state.hidden])); } catch {}
 }
 
 function searchHTML(qs) {
@@ -1206,12 +1240,19 @@ function lineHTML(l) {
 }
 
 sheetBody.addEventListener('click', e => {
+  const modeBtn = e.target.closest('[data-mode]');
+  if (modeBtn) {
+    const ml = model.lines.filter(l => (l.mode || 'tube') === modeBtn.dataset.mode);
+    const allOff = ml.every(l => state.hidden.has(l.id));
+    for (const l of ml) allOff ? state.hidden.delete(l.id) : state.hidden.add(l.id);
+    syncModes(); renderSheet(); return;
+  }
   const eye = e.target.closest('[data-eye]');
   if (eye) {
     e.stopPropagation();
     const id = eye.dataset.eye;
     state.hidden.has(id) ? state.hidden.delete(id) : state.hidden.add(id);
-    renderSheet(); return;
+    syncModes(); renderSheet(); return;
   }
   if (e.target.closest('[data-act="close"]')) { closeDetail(); return; }
   const st = e.target.closest('[data-station]');
@@ -1236,6 +1277,8 @@ state.cam = fitCam();
 state.fitScale = state.cam.s;
 // Portrait phones: the whole network is tiny, so open on central London
 // (the fit button still shows everything).
+try { for (const id of JSON.parse(localStorage.getItem('tube-hidden') || '[]')) if (model.lineById.has(id)) state.hidden.add(id); } catch {}
+syncModes();
 renderSheet();
 setSnap('peek', false);
 netBounds = bounds();

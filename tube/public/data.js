@@ -25,6 +25,7 @@ export function createData(network) {
     get clockOffset() { return clockOffset; },
     async trains() { const r = await call('trains'); clockOffset = r.clockOffset; return r; },
     station: ids => call('station', { ids }),
+    setModes: list => call('setModes', { list }),
     status: () => call('status'),
   };
 }

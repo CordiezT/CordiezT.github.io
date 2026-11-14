@@ -87,7 +87,10 @@ export const ANCHORS = {
 
   // --- Victoria line ----------------------------------------------------------
   'Finsbury Park': [0, -6],
-  'Walthamstow Central': [8, -10],
+  'Walthamstow Central': [10, -10],
+  'Seven Sisters': [4, -10],
+  'Tottenham Hale': [6, -10],
+  'Blackhorse Road': [8, -10],
   'Green Park': [-6, 8],
   'Pimlico': [-6, 16],
   'Vauxhall': [-4, 18],
@@ -97,6 +100,8 @@ export const ANCHORS = {
   'Piccadilly Circus': [-4, 8],
   'Covent Garden': [-1, 7],
   'Russell Square': [0, 3],
+  'Caledonian Road': [1, -1],
+  'Arsenal': [1, -5],
   'Cockfosters': [0, -20],
   "Earl's Court": [-16, 14],
   'Barons Court': [-19, 14],
@@ -107,8 +112,9 @@ export const ANCHORS = {
   'Rayners Lane': [-28, -6],
   'Uxbridge': [-36, -6],
   'Hatton Cross': [-38, 18],
-  'Heathrow Terminals 2 & 3': [-41, 18],
-  'Heathrow Terminal 5': [-44, 18],
+  'Heathrow Terminals 2 & 3': [-42, 18],
+  'Heathrow Terminal 5': [-45, 18],
+  'Heathrow Terminal 4': [-40, 20],
 
   // --- District & Hammersmith & City -----------------------------------------
   'Kensington (Olympia)': [-16, 12],
@@ -138,12 +144,96 @@ export const ANCHORS = {
   'Canning Town': [24, 9],
 
   // --- Bakerloo line -----------------------------------------------------------
-  'Harrow & Wealdstone': [-22, -16],
+  'Harrow & Wealdstone': [-21, -16],
 };
+
+
+// --- Elizabeth line, Overground, DLR ----------------------------------------------
+Object.assign(ANCHORS, {
+  // Elizabeth line
+  'Acton Main Line': [-23, 2],
+  'Hayes & Harlington': [-42, 9],
+  'Reading': [-53, 9],
+  'Whitechapel': [20, 6],
+  'Romford': [34, 2],
+  'Shenfield': [40, -4],
+  'Custom House': [27, 9],
+  'Woolwich': [27, 12],
+  'Abbey Wood': [30, 15],
+  // Overground: Lioness
+  "Queen's Park": [-18, -2],
+  'Willesden Junction': [-21, -2],
+  'Watford Junction': [-21, -24],
+  // Overground: Mildmay
+  'West Hampstead': [-12, -8],
+  'Gospel Oak': [-8, -8],
+  'Highbury & Islington': [0, -4],
+  'Canonbury': [2, -4],
+  'Hackney Central': [12, -4],
+  'Gunnersbury': [-24, 16],
+  'West Brompton': [-16, 16],
+  "Shepherd's Bush (Central)": [-18, 6],
+  'Clapham Junction': [-12, 23],
+  // Overground: Weaver
+  'Hackney Downs': [12, -6],
+  'Edmonton Green': [4, -16],
+  'Cheshunt': [4, -22],
+  'Enfield Town': [2, -18],
+  'Chingford': [10, -16],
+  // Overground: Windrush
+  'Shoreditch High Street': [18, -2],
+  'Shadwell': [18, 8],
+  'Surrey Quays': [16, 17],
+  'New Cross ELL': [14, 19],
+  'Queens Road Peckham': [13, 17],
+  'Peckham Rye': [7, 23],
+  'Sydenham': [16, 27],
+  'Crystal Palace': [14, 29],
+  'West Croydon': [16, 34],
+  // Overground: Suffragette
+  'Barking Riverside': [32, 8],
+  'Upper Holloway': [-4, -12],
+  'Harringay Green Lanes': [2, -12],
+  'South Tottenham': [6, -12],
+  // DLR
+  'Tower Gateway': [17, 9],
+  'Westferry': [19, 10],
+  'West India Quay': [19, 12],
+  'Poplar': [21, 10],
+  'Stratford International': [26, -2],
+  'Island Gardens': [19, 18],
+  'Cutty Sark (for Maritime Greenwich)': [19, 21],
+  'Lewisham': [19, 25],
+  'Beckton': [34, 9],
+  'King George V': [29, 10],
+  'Woolwich Arsenal': [29, 12],
+});
+
+// Rail lines that run alongside an existing route without stopping are drawn
+// as their own lane in that route's bundle: [line, from, to, [stations passed]].
+export const PASS_THROUGH = [
+  ['elizabeth', 'Bond Street', 'Tottenham Court Road', ['Oxford Circus']],
+  ['elizabeth', 'Farringdon', 'Liverpool Street', ['Barbican', 'Moorgate']],
+  ['elizabeth', 'Liverpool Street', 'Whitechapel', ['Aldgate East']],
+  ['elizabeth', 'Whitechapel', 'Stratford', ['Stepney Green', 'Mile End']],
+  ['elizabeth', 'Whitechapel', 'Canary Wharf', ['Shadwell', 'Limehouse', 'Westferry', 'West India Quay']],
+  ['elizabeth', 'Canary Wharf', 'Custom House', ['West India Quay', 'Poplar', 'Blackwall', 'East India', 'Canning Town', 'Royal Victoria']],
+];
+
+// Planned bends (grid points) for connections that would otherwise cut across
+// the map: [line, from, to, [[x, y], ...]].
+export const WAYPOINTS = [
+  ['elizabeth', 'Paddington', 'Bond Street', [[-12, 4], [-10, 4]]],
+  ['elizabeth', 'Paddington', 'Acton Main Line', [[-15, 3], [-22, 3]]],
+  ['mildmay', 'Kensington (Olympia)', "Shepherd's Bush (Central)", [[-16, 8]]],
+  ['mildmay', "Shepherd's Bush (Central)", 'Willesden Junction', [[-18, 1]]],
+  ['windrush', 'Shoreditch High Street', 'Whitechapel', [[18, 4]]],
+  ['dlr', 'Bank', 'Shadwell', [[11, 7], [17, 7]]],
+];
 
 // The Thames, in the same grid: horizontal / vertical / 45° runs threaded
 // between the stations on each bank (checked automatically at build time).
 export const RIVER = [
   [-34, 16.5], [-22.5, 16.5], [-18.25, 20.75], [-9.25, 20.75], [-5, 16.5], [-3.5, 15], [1, 15],
-  [1, 13], [17.5, 13], [17.5, 16], [20, 16], [20, 10.5], [40, 10.5],
+  [1, 13], [17.5, 13], [17.5, 19.5], [20.5, 19.5], [20.5, 10.5], [40, 10.5],
 ];

@@ -101,6 +101,9 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 @media (hover: hover) { .row:hover { background: var(--hover); } }
 .row.off { opacity: .4; }
 .row .sw { width: 5px; align-self: stretch; margin: 5px 0; border-radius: 3px; flex: none; }
+.row .sw.cased { width: 7px; background-image: linear-gradient(var(--bg), var(--bg)); background-size: 2px 100%; background-repeat: no-repeat; background-position: center; }
+.label.mode { display: flex; align-items: center; justify-content: space-between; margin-top: 18px; padding-right: 8px; }
+.label.mode .eye { width: 32px; height: 32px; display: grid; place-items: center; color: var(--dim); border-radius: 8px; }
 .row .main { flex: 1; min-width: 0; }
 .row .name { font-size: 15px; font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .row .meta { font-size: 13px; color: var(--dim); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

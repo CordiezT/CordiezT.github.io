@@ -10,7 +10,7 @@
 import { writeFile, readFile, mkdir } from 'node:fs/promises';
 import { LINES } from '../public/shared/lines.mjs';
 import { schematicLayout, anchoredLayout } from './layout.mjs';
-import { ANCHORS, RIVER, UNIT } from './anchors.mjs';
+import { ANCHORS, RIVER, UNIT, PASS_THROUGH, WAYPOINTS } from './anchors.mjs';
 import { loadThames, simplify } from './river.mjs';
 
 const KEY = process.env.TFL_APP_KEY ? `&app_key=${process.env.TFL_APP_KEY}` : '';
@@ -36,36 +36,52 @@ async function fetchJSON(url) {
 }
 
 const shortName = n => n
-  .replace(/ Underground Station$/, '')
+  .replace(/ (Underground|Rail|DLR) Station$/, '')
+  .replace(/^London (Liverpool Street|Euston|Paddington|Fenchurch Street|Victoria)$/, '$1')
+  .replace(/ \(London\)$/, '')
   .replace(/-Underground$/, '')
   .replace(/ \([^)]*(Line|Bakerloo)[^)]*\)$/i, '')
   .replace(/^Heathrow Terminals 1-2-3$/, 'Heathrow T1-2-3')
   .trim();
 
-const stations = new Map(); // naptan -> station
+const stations = new Map(); // node id -> station
 const lines = [];
+// Rail, DLR and Tube platforms of the same interchange have different NaPTAN
+// codes but share a TfL hub: they become one node on the map. `aliases` maps
+// every code to its node so live arrivals can be matched.
+const aliases = new Map();
+const byHub = new Map();
+const metres = (a, b) => Math.hypot((a.lon - b.lon) * 69400, (a.lat - b.lat) * 111320);
+const resolve = (sp, mode) => {
+  const raw = sp.stationId || sp.id;
+  if (stations.has(raw)) return raw;
+  if (aliases.has(raw)) return aliases.get(raw);
+  const hub = sp.topMostParentId;
+  // Only merge across modes: separate Tube stations sharing a hub (the two
+  // Paddingtons, the two Hammersmiths) stay separate, as on the Tube map.
+  if (hub && mode !== 'tube' && byHub.has(hub)) {
+    const near = byHub.get(hub).map(s => [s, metres(s, sp)]).sort((a, b) => a[1] - b[1])[0];
+    if (near && near[1] < 700) { aliases.set(raw, near[0].id); return near[0].id; }
+  }
+  const s = { id: raw, name: shortName(sp.name), lat: sp.lat, lon: sp.lon, hub: hub || null, zone: sp.zone || null, lines: new Set() };
+  stations.set(raw, s);
+  if (hub) (byHub.get(hub) || byHub.set(hub, []).get(hub)).push(s);
+  return raw;
+};
 
 for (const line of LINES) {
   const d = await getJSON(`https://api.tfl.gov.uk/Line/${line.id}/Route/Sequence/all?serviceTypes=Regular&excludeCrowding=true${KEY}`);
   for (const seq of d.stopPointSequences) {
-    for (const sp of seq.stopPoint) {
-      const id = sp.stationId || sp.id;
-      if (!stations.has(id)) {
-        stations.set(id, {
-          id, name: shortName(sp.name), lat: sp.lat, lon: sp.lon,
-          hub: sp.topMostParentId || null, zone: sp.zone || null, lines: new Set(),
-        });
-      }
-      stations.get(id).lines.add(line.id);
-    }
+    for (const sp of seq.stopPoint) stations.get(resolve(sp, line.mode)).lines.add(line.id);
   }
-  const routes = d.orderedLineRoutes.map(r => r.naptanIds);
+  const node = id => aliases.get(id) || id;
+  const routes = d.orderedLineRoutes.map(r => r.naptanIds.map(node).filter((id, i, a) => i === 0 || a[i - 1] !== id));
   // Unique undirected edges from both ordered routes and branch sequences.
   const edgeSet = new Map();
   const addEdge = (a, b) => { if (a === b) return; const k = a < b ? `${a}|${b}` : `${b}|${a}`; edgeSet.set(k, [a, b]); };
   for (const r of routes) for (let i = 1; i < r.length; i++) addEdge(r[i - 1], r[i]);
   for (const seq of d.stopPointSequences) {
-    const ids = seq.stopPoint.map(s => s.stationId || s.id);
+    const ids = seq.stopPoint.map(s => node(s.stationId || s.id));
     for (let i = 1; i < ids.length; i++) addEdge(ids[i - 1], ids[i]);
   }
   lines.push({ ...line, edges: [...edgeSet.values()], routes });
@@ -128,6 +144,35 @@ if (useAnchors) {
   anchoredLayout(list, E, anchors);
 } else {
   schematicLayout(list, E);
+}
+
+// --- Pass-throughs and waypoints (anchored layout only) -------------------------
+const ekey = (a, b) => (a < b ? `${a}|${b}` : `${b}|${a}`);
+const findOn = (name, lineId) => {
+  const c = list.filter(s => s.name === name);
+  return c.find(s => !lineId || s.lines.has(lineId)) || c[0];
+};
+const via = {};
+if (useAnchors) {
+  for (const [lineId, from, to, through] of PASS_THROUGH) {
+    const l = lines.find(x => x.id === lineId);
+    const a = findOn(from, lineId), b = findOn(to, lineId);
+    const mids = through.map(n => findOn(n));
+    if (!a || !b || mids.some(m => !m)) { console.warn(`pass-through: unknown station in ${lineId} ${from}→${to}`); continue; }
+    const k = ekey(a.id, b.id);
+    if (!l.edges.some(([x, y]) => ekey(x, y) === k)) { console.warn(`pass-through: ${lineId} has no edge ${from}–${to}`); continue; }
+    l.edges = l.edges.filter(([x, y]) => ekey(x, y) !== k);
+    const seq = [a, ...mids, b];
+    for (let i = 1; i < seq.length; i++) if (!l.edges.some(([x, y]) => ekey(x, y) === ekey(seq[i - 1].id, seq[i].id))) l.edges.push([seq[i - 1].id, seq[i].id]);
+  }
+  for (const [lineId, from, to, pts] of WAYPOINTS) {
+    const a = findOn(from, lineId), b = findOn(to, lineId);
+    if (!a || !b) { console.warn(`waypoints: unknown station in ${lineId} ${from}→${to}`); continue; }
+    // Stored in the a→b direction of the sorted key, so clients can orient them.
+    const [p, q] = a.id < b.id ? [a, b] : [b, a];
+    const world = pts.map(([x, y]) => [Math.round(x * UNIT), Math.round(y * UNIT)]);
+    (via[lineId] ||= {})[ekey(a.id, b.id)] = p === a ? world : world.reverse();
+  }
 }
 
 // --- The Thames -------------------------------------------------------------
@@ -240,7 +285,9 @@ const out = {
     lat: +s.lat.toFixed(6), lon: +s.lon.toFixed(6),
     x: round(s.x), y: round(s.y), gx: round(s.gx), gy: round(s.gy),
   })).sort((a, b) => a.name.localeCompare(b.name)),
-  lines: lines.map(l => ({ id: l.id, name: l.name, color: l.color, edges: l.edges, routes: l.routes })),
+  lines: lines.map(l => ({ id: l.id, name: l.name, color: l.color, mode: l.mode, edges: l.edges, routes: l.routes })),
+  aliases: Object.fromEntries(aliases),
+  via,
   river: river.map(p => [round(p.x), round(p.y), round(p.gx), round(p.gy)]),
   attribution: 'Station and route data: TfL Open Data. River Thames: © OpenStreetMap contributors (ODbL).',
 };

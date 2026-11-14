@@ -15,6 +15,9 @@ const HOP_LIMIT = 99;
 
 export function createReconstructor(network) {
   const lineGraphs = new Map();
+  // Rail / DLR platforms merged into Tube interchange nodes (see build-network).
+  const aliases = network.aliases || {};
+  const nid = id => aliases[id] || id;
   const stationById = new Map(network.stations.map(s => [s.id, s]));
 
   for (const line of network.lines) {
@@ -82,15 +85,21 @@ export function createReconstructor(network) {
 
   return function reconstruct(predictions, now = Date.now()) {
     const groups = new Map();
+    const anonymous = new Map(); // lineId -> predictions without a train id (DLR)
     let unidentified = 0, unknownStation = 0;
-    for (const p of predictions) {
-      const g = lineGraphs.get(p.lineId);
+    for (const raw of predictions) {
+      const g = lineGraphs.get(raw.lineId);
       if (!g) continue;
-      const vid = (p.vehicleId || '').trim();
-      if (!vid || /^0+$/.test(vid)) { unidentified++; continue; }
+      const p = { ...raw, naptanId: nid(raw.naptanId), destinationNaptanId: raw.destinationNaptanId ? nid(raw.destinationNaptanId) : null };
       if (!g.adj.has(p.naptanId)) { unknownStation++; continue; }
       const t = Date.parse(p.expectedArrival);
       if (!(t > now - 90_000)) continue; // already passed
+      const vid = (p.vehicleId || '').trim();
+      if (!vid || /^0+$/.test(vid)) {
+        unidentified++;
+        (anonymous.get(p.lineId) || anonymous.set(p.lineId, []).get(p.lineId)).push({ ...p, t, ts: Date.parse(p.timestamp) });
+        continue;
+      }
       const key = `${p.lineId}:${vid}`;
       (groups.get(key) || groups.set(key, []).get(key)).push({ ...p, t, ts: Date.parse(p.timestamp) });
     }
@@ -181,6 +190,13 @@ export function createReconstructor(network) {
         }
 
         const observedAt = Math.max(...chain.map(p => p.ts));
+        // Rail feeds (no location text) also list trips that haven't started:
+        // skip trains whose next stop is still far off, or that are waiting at
+        // the start of their journey.
+        if (!freshest.currentLocation) {
+          if (stops[0][1] > now + 8 * 60_000) return;
+          if (!from && g.adj.get(s1).size === 1 && stops[0][1] > now + 2 * 60_000) return;
+        }
         trains.push({
           id: ci ? `${key}#${ci + 1}` : key,
           line: lineId,
@@ -196,14 +212,57 @@ export function createReconstructor(network) {
         });
       });
     }
+    // Lines without train ids (DLR): infer trains from the predictions.
+    for (const [lineId, preds] of anonymous) trains.push(...inferAnonymous(lineId, preds, now));
     return { trains, stats: { predictions: predictions.length, trains: trains.length, unidentified, unknownStation, split } };
   };
+
+  // A train heading for destination D shows up as predictions at successive
+  // stations with increasing times. A prediction at station S is the train's
+  // *next* stop when there is no matching prediction for the same destination
+  // at the station just before S (otherwise the train hasn't reached that one
+  // yet). From each such leading prediction, follow the line towards D picking
+  // the matching prediction at each next station.
+  function inferAnonymous(lineId, preds, now) {
+    const g = lineGraphs.get(lineId);
+    const out = [];
+    const byDest = new Map();
+    for (const p of preds) if (p.destinationNaptanId && g.adj.has(p.destinationNaptanId)) (byDest.get(p.destinationNaptanId) || byDest.set(p.destinationNaptanId, []).get(p.destinationNaptanId)).push(p);
+    for (const [D, list] of byDest) {
+      const at = new Map();
+      for (const p of list) (at.get(p.naptanId) || at.set(p.naptanId, []).get(p.naptanId)).push(p);
+      for (const ps of at.values()) ps.sort((a, b) => a.t - b.t);
+      const toward = (S, upstream) => [...g.adj.get(S)].filter(n => (upstream ? hop(g, n, D) > hop(g, S, D) : hop(g, n, D) < hop(g, S, D)));
+      const near = (S, lo, hi, target) => (at.get(S) || []).filter(p => p.t >= lo && p.t <= hi).sort((a, b) => Math.abs(a.t - target) - Math.abs(b.t - target))[0];
+      for (const p of list) {
+        const ups = toward(p.naptanId, true);
+        if (ups.some(U => near(U, p.t - 360_000, p.t - 15_000, p.t - 90_000))) continue; // not leading
+        const stops = [[p.naptanId, p.t]];
+        let cur = p.naptanId, t = p.t;
+        for (let i = 0; i < 9; i++) {
+          let best = null;
+          for (const n of toward(cur, false)) { const q = near(n, t + 15_000, t + 420_000, t + 100_000); if (q && (!best || q.t < best.t)) best = q; }
+          if (!best) break;
+          stops.push([best.naptanId, best.t]); cur = best.naptanId; t = best.t;
+        }
+        const from = ups.length === 1 ? ups[0] : null;
+        const fromT = from ? p.t - (distM(from, p.naptanId) / 11 * 1000 + 5_000) : null;
+        if (!from && stops[0][1] > now + 3 * 60_000) continue; // still waiting at its origin
+        out.push({
+          id: null, line: lineId, vehicleId: '', destination: D,
+          destinationName: cleanName(p.destinationName || ''), towards: '', platform: p.platformName || '', location: '',
+          from, fromT, stops, observedAt: Math.max(...list.map(x => x.ts)), anonymous: true,
+        });
+      }
+    }
+    return out;
+  }
 }
 
-export function stationArrivals(predictions, ids, now = Date.now()) {
+export function stationArrivals(predictions, ids, now = Date.now(), aliases = {}) {
   const want = new Set(ids);
   return predictions
-    .filter(p => want.has(p.naptanId))
+    .filter(p => want.has(aliases[p.naptanId] || p.naptanId))
     .map(p => ({
       line: p.lineId,
       vehicleId: (p.vehicleId || '').trim(),
@@ -219,13 +278,13 @@ export function stationArrivals(predictions, ids, now = Date.now()) {
 }
 
 export function cleanName(n) {
-  return n.replace(/ Underground Station$/, '').replace(/-Underground$/, '').replace(/ \([^)]*(Line|Bakerloo)[^)]*\)$/i, '').trim();
+  return n.replace(/ (Underground|Rail|DLR) Station$/, '').replace(/^London (Liverpool Street|Euston|Paddington|Fenchurch Street|Victoria)$/, '$1').replace(/ \(London\)$/, '').replace(/-Underground$/, '').replace(/ \([^)]*(Line|Bakerloo)[^)]*\)$/i, '').trim();
 }
 
 function norm(s) {
   return (s || '')
     .toLowerCase()
-    .replace(/ underground station$/, '')
+    .replace(/ (underground|rail|dlr) station$/, '')
     .replace(/\([^)]*\)/g, '')
     .replace(/&/g, ' and ')
     .replace(/\bst\.?\b/g, 'st')

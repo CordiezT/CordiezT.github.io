@@ -1,6 +1,6 @@
 # Underground Live
 
-Live London Underground map. Every train on the 11 lines is rebuilt from TfL arrival predictions and animated on a network drawn from scratch.
+Live London rail map: the Underground, Elizabeth line, the six Overground lines and the DLR. Every train is rebuilt from TfL arrival predictions and animated on a network drawn from scratch.
 
 ```
 npm start               # local dev server: http://localhost:8787 (also prints a URL for your phone)
@@ -33,6 +33,14 @@ The Node server in `server/` is optional, for local development. It still expose
 - **TrackerNet** (`/trackernet/PredictionSummary`, `PredictionDetailed`) needs a subscription key. It returns 401 without one, so it isn't used yet.
 - **No push mechanism** (no WebSocket or SSE) for tube data. Polling is the only option.
 - **Line status** comes from `/Line/Mode/tube/Status` (polled every 60 s).
+
+## Elizabeth line, Overground and DLR
+
+- **Feeds.** Four arrivals feeds (`/Mode/{tube,elizabeth-line,overground,dlr}/Arrivals`) are fetched on their own schedules, and only for the modes currently shown.
+- **Interchanges.** Rail, DLR and Tube platforms that share a TfL hub become one map node. `network.json` lists the station-code aliases used to match arrivals to those nodes.
+- **Elizabeth line and Overground.** Their predictions carry a per-trip id but no location text. The previous station is inferred from the track layout, and trips that haven't started yet are skipped.
+- **DLR.** TfL publishes no train ids for the DLR. Trains are inferred from the predictions themselves: a prediction is a train's *next stop* when no matching prediction exists at the station before it. Trains are then followed towards their destination, and kept stable between updates by matching each one against the previous snapshot.
+- **Layout.** Rail lines that run alongside an existing route are drawn as their own lane in that bundle (`PASS_THROUGH`). A few connections have planned bends (`WAYPOINTS`). Both are defined in `scripts/anchors.mjs`.
 
 ## How positions are estimated
 

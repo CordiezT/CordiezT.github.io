@@ -32,6 +32,17 @@ export function buildModel(network, lineDefs) {
   }
 
   const model = { stations, lines, lineById: new Map(lines.map(l => [l.id, l])), physical, edgeKey, layout: 'schematic', riverRaw: network.river || [] };
+  // Planned bends (waypoints) per line, keyed by sorted station pair.
+  for (const l of lines) l.viaRaw = new Map(Object.entries(network.via?.[l.id] || {}));
+  // World-space points of a line between two adjacent stations, a→b inclusive.
+  model.edgePoints = (l, a, b) => {
+    const A = stations.get(a), B = stations.get(b);
+    const k = a < b ? `${a}|${b}` : `${b}|${a}`;
+    const v = l.via?.get(k);
+    if (!v) return [[A.wx, A.wy], [B.wx, B.wy]];
+    const mid = a < b ? v : [...v].reverse();
+    return [[A.wx, A.wy], ...mid, [B.wx, B.wy]];
+  };
   model.setLayout = (mode, t = 1) => setLayout(model, mode, t);
   model.setLayout('schematic');
 
@@ -134,6 +145,20 @@ const GEO_SCALE = 0.42;
 function setLayout(model, mode, t) {
   model.layout = mode;
   const kk = mode === 'geo' ? t : 1 - t;
+  // Waypoints: schematic positions morph to evenly spaced points on the
+  // straight geographic connection.
+  for (const l of model.lines || []) {
+    l.via = new Map();
+    for (const [k, pts] of l.viaRaw || []) {
+      const [a, b] = k.split('|').map(id => model.stations.get(id));
+      if (!a || !b) continue;
+      l.via.set(k, pts.map(([x, y], i) => {
+        const f = (i + 1) / (pts.length + 1);
+        const gx = (a.gx + (b.gx - a.gx) * f) * GEO_SCALE, gy = (a.gy + (b.gy - a.gy) * f) * GEO_SCALE;
+        return [x + (gx - x) * kk, y + (gy - y) * kk];
+      }));
+    }
+  }
   model.river = (model.riverRaw || []).map(([x, y, gx, gy]) => [x + (gx * GEO_SCALE - x) * kk, y + (gy * GEO_SCALE - y) * kk]);
   for (const s of model.stations.values()) {
     const sx = s.x, sy = s.y, gx = s.gx * GEO_SCALE, gy = s.gy * GEO_SCALE;
